@@ -12,7 +12,12 @@
  */
 
 import { chromium } from 'playwright';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dir = dirname(fileURLToPath(import.meta.url));
+const PROFILES_DIR = join(__dir, 'profiles');
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -88,11 +93,22 @@ async function launchBrowser() {
   return browser;
 }
 
+function loadProfile(name) {
+  if (!name) return null;
+  const path = join(PROFILES_DIR, `${name}.json`);
+  if (!existsSync(path)) {
+    console.error(`Profile "${name}" not found. Run: node profile-manager.mjs import-sites`);
+    return null;
+  }
+  return JSON.parse(readFileSync(path, 'utf8'));
+}
+
 async function newStealthContext(browser, opts = {}) {
   const ua = opts.userAgent || pick(USER_AGENTS);
   const vp = opts.viewport || pick(VIEWPORTS);
+  const profile = opts.profile ? loadProfile(opts.profile) : null;
 
-  const context = await browser.newContext({
+  const contextOpts = {
     userAgent: ua,
     viewport: vp,
     locale: 'en-US',
@@ -102,7 +118,17 @@ async function newStealthContext(browser, opts = {}) {
       'Accept-Language': 'en-US,en;q=0.9',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     },
-  });
+  };
+
+  // Load cookies from profile (Playwright storageState format)
+  if (profile?.cookies?.length) {
+    contextOpts.storageState = {
+      cookies: profile.cookies,
+      origins: profile.origins || [],
+    };
+  }
+
+  const context = await browser.newContext(contextOpts);
 
   // Evasion scripts
   await context.addInitScript(() => {
@@ -221,7 +247,7 @@ async function searchDDG(page, query, pageNum = 1) {
 // ─── Page fetch ───────────────────────────────────────────────────────────────
 
 async function fetchPage(browser, url, opts = {}) {
-  const context = await newStealthContext(browser);
+  const context = await newStealthContext(browser, { profile: opts.profile });
   const page = await context.newPage();
 
   try {
@@ -287,10 +313,11 @@ async function cmdSearch(args) {
   const engine = getArg(args, 'engine', 'ddg');
   const jsonOut = args.includes('--json');
 
-  if (!query) { console.error('Usage: ghost-browse search "query" [--limit N] [--engine google|bing|ddg]'); process.exit(1); }
+  const profile = getArg(args, 'profile', null);
+  if (!query) { console.error('Usage: ghost-browse search "query" [--limit N] [--engine google|bing|ddg] [--profile name]'); process.exit(1); }
 
   const browser = await launchBrowser();
-  const context = await newStealthContext(browser);
+  const context = await newStealthContext(browser, { profile });
   const page = await context.newPage();
 
   try {
@@ -323,12 +350,13 @@ async function cmdFetch(args) {
   const jsonOut = args.includes('--json');
   const scroll = args.includes('--scroll');
   const maxChars = parseInt(getArg(args, 'max', '8000'));
+  const profile = getArg(args, 'profile', null);
 
   if (!url) { console.error('Usage: ghost-browse fetch "https://..." [--scroll] [--max N]'); process.exit(1); }
 
   const browser = await launchBrowser();
   try {
-    const result = await fetchPage(browser, url, { scroll });
+    const result = await fetchPage(browser, url, { scroll, profile });
     if (jsonOut) {
       console.log(JSON.stringify({ ...result, content: result.content.slice(0, maxChars) }, null, 2));
     } else {
