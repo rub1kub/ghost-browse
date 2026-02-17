@@ -51,6 +51,34 @@ export async function isCaptcha(page) {
   }
 }
 
+export async function trySolveCaptcha(page, url) {
+  // Step 1: Try to click reCAPTCHA "I'm not a robot" checkbox
+  try {
+    // reCAPTCHA is usually in an iframe
+    const frames = page.frames();
+    for (const frame of frames) {
+      const checkbox = await frame.$('#recaptcha-anchor, .recaptcha-checkbox-border, [role="presentation"]');
+      if (checkbox) {
+        console.log('   🤖 Found reCAPTCHA checkbox, clicking...');
+        await checkbox.click();
+        await new Promise(r => setTimeout(r, 3000));
+        
+        // Check if it solved (sometimes just clicking works)
+        const stillCaptcha = await isCaptcha(page);
+        if (!stillCaptcha.detected) {
+          console.log('   ✅ Captcha solved by clicking checkbox!');
+          return true;
+        }
+        console.log('   ⚠️  Click alone didn\'t solve it — need image challenge');
+        break;
+      }
+    }
+  } catch (e) {
+    console.log('   Auto-solve failed:', e.message);
+  }
+  return false;
+}
+
 export async function handleCaptcha(page, url, opts = {}) {
   const captchaInfo = await isCaptcha(page);
   if (!captchaInfo.detected) return false;
@@ -58,19 +86,31 @@ export async function handleCaptcha(page, url, opts = {}) {
   console.log(`\n⚠️  CAPTCHA detected on ${url}`);
   console.log(`   Signal: ${captchaInfo.signal}`);
 
-  // Screenshot it
+  // Step 1: Try auto-solve (click checkbox)
+  const solved = await trySolveCaptcha(page, url);
+  if (solved) return 'solved';
+
+  // Step 2: Screenshot and alert human
   mkdirSync(CAPTCHA_DIR, { recursive: true });
   const timestamp = Date.now();
   const screenshotPath = join(CAPTCHA_DIR, `captcha-${timestamp}.png`);
   await page.screenshot({ path: screenshotPath, fullPage: false });
-  console.log(`   Screenshot: ${screenshotPath}`);
+  console.log(`   📸 Screenshot: ${screenshotPath}`);
+
+  // Write pending captcha for heartbeat/message pickup
+  writeFileSync('/tmp/ghost-captcha-pending.json', JSON.stringify({
+    url,
+    screenshot: screenshotPath,
+    time: new Date().toISOString(),
+    signal: captchaInfo.signal,
+  }));
 
   // Alert user via Telegram if configured
   if (opts.alertTelegram) {
     await alertUserTelegram(screenshotPath, url, opts);
   }
 
-  return true;
+  return 'needs_human';
 }
 
 async function alertUserTelegram(screenshotPath, captchaUrl, opts = {}) {

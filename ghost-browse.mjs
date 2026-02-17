@@ -400,15 +400,19 @@ async function fetchPage(browser, url, opts = {}) {
     await randomDelay(500, 1200);
     await dismissCookieBanner(page);
 
-    // Captcha check
+    // Captcha check + auto-solve attempt
     const captchaDetected = await isCaptcha(page);
     if (captchaDetected.detected) {
-      const screenshotPath = await takeScreenshot(page, 'captcha');
-      console.error(`⚠️  CAPTCHA on ${url} (${captchaDetected.signal})`);
-      console.error(`   Screenshot: ${screenshotPath}`);
-      if (opts.alertTelegram) await handleCaptcha(page, url, opts);
-      // Return partial result with captcha flag
-      return { url, title: 'CAPTCHA', content: '[CAPTCHA detected — screenshot saved]', captcha: true, captchaScreenshot: screenshotPath, links: [] };
+      console.error(`⚠️  CAPTCHA on ${url} — trying to solve...`);
+      const result = await handleCaptcha(page, url, { alertTelegram: opts.alertTelegram });
+      if (result === 'solved') {
+        // Captcha solved, wait for page to load
+        await randomDelay(2000, 4000);
+      } else {
+        // Needs human — screenshot and return partial
+        const screenshotPath = await takeScreenshot(page, 'captcha');
+        return { url, title: 'CAPTCHA', content: '[CAPTCHA — needs human, screenshot saved at ' + screenshotPath + ']', captcha: true, captchaScreenshot: screenshotPath, links: [] };
+      }
     }
 
     // Optional screenshot
