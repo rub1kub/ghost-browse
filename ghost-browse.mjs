@@ -20,6 +20,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { isCaptcha, handleCaptcha } from './captcha-handler.mjs';
 import { getCached, setCache } from './cache.mjs';
+import { generateFingerprint, getFingerprintScript } from './fingerprint.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const PROFILES_DIR = join(__dir, 'profiles');
@@ -171,12 +172,10 @@ async function launchBrowser(opts = {}) {
   if (proxy) ctxOpts.proxy = proxy;
 
   const context = await chromium.launchPersistentContext(profileDir, ctxOpts);
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    delete window.__playwright;
-    delete window.__pw_manual;
-    window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };
-  });
+
+  // Inject randomized fingerprint (Canvas, WebGL, AudioContext, platform, etc.)
+  const fp = generateFingerprint();
+  await context.addInitScript(getFingerprintScript(fp));
 
   // Cleanup temp dir on close
   const origClose = context.close.bind(context);

@@ -10,3 +10,4 @@ screenshots/
 captcha-screenshots/
 profiles/*.json
 profiles/*.txt
+.downloads/
