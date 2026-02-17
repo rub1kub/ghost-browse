@@ -12,12 +12,67 @@
  */
 
 import { chromium } from 'playwright';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { isCaptcha, handleCaptcha } from './captcha-handler.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const PROFILES_DIR = join(__dir, 'profiles');
+const SCREENSHOTS_DIR = join(__dir, 'screenshots');
+
+// ─── Proxy support ────────────────────────────────────────────────────────────
+
+let proxyList = [];
+let proxyIndex = 0;
+
+function loadProxies(proxyArg) {
+  if (!proxyArg) return;
+  // Support: single proxy URL, or path to file with one proxy per line
+  if (existsSync(proxyArg)) {
+    proxyList = readFileSync(proxyArg, 'utf8').split('\n').map(l => l.trim()).filter(Boolean);
+  } else {
+    proxyList = [proxyArg];
+  }
+  console.log(`🔀 Loaded ${proxyList.length} proxy(ies)`);
+}
+
+function nextProxy() {
+  if (!proxyList.length) return null;
+  const proxy = proxyList[proxyIndex % proxyList.length];
+  proxyIndex++;
+  // Format: http://user:pass@host:port or host:port
+  const url = proxy.includes('://') ? proxy : `http://${proxy}`;
+  return { server: url };
+}
+
+// ─── Retry logic ──────────────────────────────────────────────────────────────
+
+async function withRetry(fn, opts = {}) {
+  const maxAttempts = opts.retries || 3;
+  const baseDelay = opts.retryDelay || 2000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === maxAttempts) throw err;
+      const delay = baseDelay * Math.pow(2, attempt - 1); // exponential backoff
+      console.log(`  ⚠️  Attempt ${attempt}/${maxAttempts} failed: ${err.message.slice(0, 60)} → retry in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+}
+
+// ─── Screenshot util ──────────────────────────────────────────────────────────
+
+async function takeScreenshot(page, name = 'screenshot') {
+  mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+  const ts = Date.now();
+  const path = join(SCREENSHOTS_DIR, `${name}-${ts}.png`);
+  await page.screenshot({ path, fullPage: false });
+  return path;
+}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -71,11 +126,11 @@ function htmlToMarkdown(html) {
 
 // ─── Browser factory ──────────────────────────────────────────────────────────
 
-async function launchBrowser() {
-  // Try system Chrome first (available via OpenClaw), fall back to chromium
+async function launchBrowser(opts = {}) {
   const execPath = process.env.CHROME_PATH || '/home/openclawd/.openclaw/bin/chrome-xvfb';
+  const proxy = opts.proxy || nextProxy();
 
-  const browser = await chromium.launch({
+  const launchOpts = {
     headless: true,
     executablePath: existsSync(execPath) ? execPath : undefined,
     args: [
@@ -89,8 +144,10 @@ async function launchBrowser() {
       '--no-zygote',
       '--window-size=1920,1080',
     ],
-  });
-  return browser;
+  };
+  if (proxy) launchOpts.proxy = proxy;
+
+  return await chromium.launch(launchOpts);
 }
 
 function loadProfile(name) {
@@ -254,6 +311,25 @@ async function fetchPage(browser, url, opts = {}) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await randomDelay(500, 1200);
 
+    // Captcha check
+    const captchaDetected = await isCaptcha(page);
+    if (captchaDetected.detected) {
+      const screenshotPath = await takeScreenshot(page, 'captcha');
+      console.error(`⚠️  CAPTCHA on ${url} (${captchaDetected.signal})`);
+      console.error(`   Screenshot: ${screenshotPath}`);
+      if (opts.alertTelegram) await handleCaptcha(page, url, opts);
+      // Return partial result with captcha flag
+      return { url, title: 'CAPTCHA', content: '[CAPTCHA detected — screenshot saved]', captcha: true, captchaScreenshot: screenshotPath, links: [] };
+    }
+
+    // Optional screenshot
+    let screenshotPath = null;
+    if (opts.screenshot) {
+      const domain = new URL(url).hostname.replace(/\./g, '-');
+      screenshotPath = await takeScreenshot(page, domain);
+      console.log(`   📸 Screenshot: ${screenshotPath}`);
+    }
+
     if (opts.scroll) {
       for (let i = 0; i < 3; i++) {
         await humanScroll(page);
@@ -289,6 +365,7 @@ async function fetchPage(browser, url, opts = {}) {
 
     result.content = htmlToMarkdown(result.html);
     delete result.html;
+    if (screenshotPath) result.screenshotPath = screenshotPath;
 
     return result;
   } finally {
@@ -314,7 +391,10 @@ async function cmdSearch(args) {
   const jsonOut = args.includes('--json');
 
   const profile = getArg(args, 'profile', null);
-  if (!query) { console.error('Usage: ghost-browse search "query" [--limit N] [--engine google|bing|ddg] [--profile name]'); process.exit(1); }
+  const proxy = getArg(args, 'proxy', null);
+  const retries = parseInt(getArg(args, 'retries', '2'));
+  if (proxy) loadProxies(proxy);
+  if (!query) { console.error('Usage: ghost-browse search "query" [--limit N] [--engine google|bing|ddg] [--profile name] [--proxy url]'); process.exit(1); }
 
   const browser = await launchBrowser();
   const context = await newStealthContext(browser, { profile });
@@ -351,12 +431,17 @@ async function cmdFetch(args) {
   const scroll = args.includes('--scroll');
   const maxChars = parseInt(getArg(args, 'max', '8000'));
   const profile = getArg(args, 'profile', null);
+  const proxy = getArg(args, 'proxy', null);
+  const screenshot = args.includes('--screenshot');
+  const retries = parseInt(getArg(args, 'retries', '2'));
+  const alertTelegram = args.includes('--alert-telegram');
+  if (proxy) loadProxies(proxy);
 
   if (!url) { console.error('Usage: ghost-browse fetch "https://..." [--scroll] [--max N]'); process.exit(1); }
 
   const browser = await launchBrowser();
   try {
-    const result = await fetchPage(browser, url, { scroll, profile });
+    const result = await withRetry(() => fetchPage(browser, url, { scroll, profile, screenshot, alertTelegram }), { retries });
     if (jsonOut) {
       console.log(JSON.stringify({ ...result, content: result.content.slice(0, maxChars) }, null, 2));
     } else {
@@ -473,19 +558,36 @@ const commands = {
 
 if (!cmd || !commands[cmd]) {
   console.log(`
-ghost-browse v1.0.0 — Stealth parallel browser for AI agents
+ghost-browse v1.2.0 — Stealth parallel browser for AI agents
 
 Commands:
-  search "query" [--limit N] [--engine google|bing|ddg] [--json]
-  fetch  "url"   [--scroll]  [--max N]  [--json]
-  batch  "url1" "url2" ...   [--concurrency N] [--max N] [--json]
+  search "query" [--limit N] [--engine google|bing|ddg] [--proxy url] [--json]
+  fetch  "url"   [--scroll]  [--max N]  [--profile name] [--screenshot] [--retries N] [--json]
+  batch  "url1" "url2" ...   [--concurrency N] [--max N] [--proxy url] [--json]
   pages  "query" [--pages N] [--engine google|bing|ddg] [--json]
 
+Extended commands (extractors.mjs):
+  node extractors.mjs twitter-timeline    --profile x-com
+  node extractors.mjs reddit-feed [sub]   --profile reddit-com
+  node extractors.mjs hackernews [top|new|ask]
+  node extractors.mjs github-trending [lang]
+  node extractors.mjs twitter-search "query"
+
+Profiles (profile-manager.mjs):
+  node profile-manager.mjs import-cdp    # import from OpenClaw browser (full decrypt)
+  node profile-manager.mjs list
+  node profile-manager.mjs show <name>
+
 Features:
-  • Anti-detection: randomized UA, viewport, timing, evasion scripts
-  • Parallel: batch fetches up to 10 pages simultaneously
+  • Anti-detection: randomized UA, viewport, timezone, evasion scripts
+  • Parallel: batch fetches up to N pages simultaneously (--concurrency)
+  • Proxy rotation: --proxy http://user:pass@host:port (or path to proxy list file)
+  • Session profiles: cookies/auth per site (--profile reddit-com)
+  • Captcha detection: auto-screenshot + Telegram alert (--alert-telegram)
+  • Screenshots: --screenshot saves PNG on every fetch
+  • Retry logic: --retries N (exponential backoff)
   • JS rendering: full Chromium render, handles SPAs
-  • Human-like: scroll patterns, typing delays, random waits
+  • Site extractors: Twitter, Reddit, HN, GitHub (extractors.mjs)
 `);
   process.exit(0);
 }
