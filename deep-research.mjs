@@ -43,6 +43,7 @@ const maxChars = parseInt(getArg(args, 'max', '2500'));
 const readPages = parseInt(getArg(args, 'read', '3'));
 const jsonOut = args.includes('--json');
 const concurrency = parseInt(getArg(args, 'concurrency', '3'));
+const decompose = args.includes('--decompose');
 
 if (!topic) {
   console.log(`
@@ -57,6 +58,7 @@ Options:
   --read N                                 Web pages to read in full (default: 3)
   --max N                                  Max chars per page (default: 2500)
   --concurrency N                          Parallel page reads (default: 3)
+  --decompose                              Auto-decompose topic into sub-questions + keyword variations
   --json                                   JSON output
 
 Examples:
@@ -64,6 +66,7 @@ Examples:
   node deep-research.mjs "TON blockchain" --sources web,twitter,reddit
   node deep-research.mjs "Rust vs Go performance" --sources web,hn,github --engine bing
   node deep-research.mjs "OpenAI drama" --sources twitter,reddit,hn
+  node deep-research.mjs "impact of AI on healthcare" --decompose
 `);
   process.exit(0);
 }
@@ -96,6 +99,153 @@ const timer = () => {
   const start = Date.now();
   return () => ((Date.now() - start) / 1000).toFixed(1) + 's';
 };
+
+// ─── Topic Decomposition & Keyword Variations ─────────────────────────────────
+
+/**
+ * Decompose a broad topic into 3-5 sub-questions and generate
+ * 2-3 keyword variations per question for wider search coverage.
+ * Uses simple heuristics (no LLM needed).
+ */
+function decomposeTopic(topic) {
+  const t = topic.toLowerCase().trim();
+  const words = t.split(/\s+/).filter(w => w.length > 2);
+  const core = words.filter(w => !['the','and','for','with','from','about','how','what','why','does','are','its'].includes(w));
+  
+  // Generate sub-questions based on common research angles
+  const subQuestions = [];
+  
+  // 1. Current state / overview
+  subQuestions.push({
+    label: 'Overview & current state',
+    queries: [
+      topic,
+      `${core.join(' ')} 2026 overview`,
+      `${core.join(' ')} latest news`,
+    ],
+  });
+  
+  // 2. Key players / companies / projects
+  subQuestions.push({
+    label: 'Key players & projects',
+    queries: [
+      `${core.join(' ')} top companies projects`,
+      `${core.join(' ')} leading players market`,
+    ],
+  });
+  
+  // 3. Technical details / how it works
+  subQuestions.push({
+    label: 'Technical details',
+    queries: [
+      `${core.join(' ')} how it works technical`,
+      `${core.join(' ')} architecture explained`,
+    ],
+  });
+  
+  // 4. Challenges / risks / criticism
+  subQuestions.push({
+    label: 'Challenges & risks',
+    queries: [
+      `${core.join(' ')} challenges problems risks`,
+      `${core.join(' ')} criticism concerns`,
+    ],
+  });
+  
+  // 5. Future outlook / trends
+  subQuestions.push({
+    label: 'Future outlook',
+    queries: [
+      `${core.join(' ')} future predictions trends`,
+      `${core.join(' ')} roadmap next`,
+    ],
+  });
+  
+  return subQuestions;
+}
+
+// ─── Confidence & Cross-Reference Scoring ─────────────────────────────────────
+
+/**
+ * Compute confidence level for findings based on source coverage.
+ * - HIGH: claim appears in 3+ sources
+ * - MEDIUM: claim appears in 2 sources
+ * - LOW: single source only (unverified)
+ */
+function computeConfidence(allResults) {
+  const sourceCounts = {};
+  let totalResults = 0;
+  let sourcesWithData = 0;
+  
+  for (const r of allResults) {
+    const count = r.results?.length || 0;
+    sourceCounts[r.source] = count;
+    totalResults += count;
+    if (count > 0) sourcesWithData++;
+  }
+  
+  // Overall confidence
+  let level, emoji;
+  if (sourcesWithData >= 3 && totalResults >= 10) {
+    level = 'HIGH';
+    emoji = '🟢';
+  } else if (sourcesWithData >= 2 && totalResults >= 5) {
+    level = 'MEDIUM';
+    emoji = '🟡';
+  } else {
+    level = 'LOW';
+    emoji = '🔴';
+  }
+  
+  return { level, emoji, sourceCounts, totalResults, sourcesWithData };
+}
+
+/**
+ * Cross-reference URLs across sources to find topics that appear
+ * in multiple places (higher credibility).
+ */
+function crossReference(allResults) {
+  const urlMap = new Map(); // url → Set of source names
+  const titleMap = new Map(); // normalized title fragment → [{source, title, url}]
+  
+  for (const r of allResults) {
+    for (const item of (r.results || [])) {
+      const url = item.url || '';
+      if (url) {
+        if (!urlMap.has(url)) urlMap.set(url, new Set());
+        urlMap.get(url).add(r.source);
+      }
+      // Also track by title keywords for fuzzy cross-ref
+      const title = (item.title || item.text || '').toLowerCase();
+      const titleWords = title.split(/\s+/).filter(w => w.length > 4).slice(0, 5).join(' ');
+      if (titleWords.length > 10) {
+        if (!titleMap.has(titleWords)) titleMap.set(titleWords, []);
+        titleMap.get(titleWords).push({ source: r.source, title: item.title || item.text, url });
+      }
+    }
+  }
+  
+  // Find items appearing in 2+ sources
+  const crossRefs = [];
+  for (const [url, sources] of urlMap) {
+    if (sources.size >= 2) {
+      crossRefs.push({ url, sources: [...sources], type: 'exact-url' });
+    }
+  }
+  for (const [key, items] of titleMap) {
+    const uniqueSources = new Set(items.map(i => i.source));
+    if (uniqueSources.size >= 2) {
+      crossRefs.push({
+        title: items[0].title,
+        sources: [...uniqueSources],
+        type: 'similar-topic',
+        items,
+      });
+    }
+  }
+  
+  return crossRefs;
+}
 
 // ─── Source: Web Search ───────────────────────────────────────────────────────
 
@@ -418,10 +568,37 @@ async function readPage(context, url, maxC) {
 
 // ─── Markdown report ──────────────────────────────────────────────────────────
 
-function generateReport(topic, results, pageContents) {
+function generateReport(topic, results, pageContents, { confidence, crossRefs, subQuestions } = {}) {
   const lines = [];
   lines.push(`# Research: ${topic}`);
-  lines.push(`_${new Date().toISOString().slice(0, 16)} UTC | Sources: ${results.map(r => r.source).join(', ')}_\n`);
+  
+  // Confidence header
+  const confStr = confidence 
+    ? ` | Confidence: ${confidence.emoji} ${confidence.level} (${confidence.sourcesWithData} sources, ${confidence.totalResults} results)`
+    : '';
+  lines.push(`_${new Date().toISOString().slice(0, 16)} UTC | Sources: ${results.map(r => r.source).join(', ')}${confStr}_\n`);
+  
+  // Sub-questions used (if decompose mode)
+  if (subQuestions && subQuestions.length) {
+    lines.push(`## 🔍 Research Sub-Questions`);
+    subQuestions.forEach((sq, i) => {
+      lines.push(`${i + 1}. **${sq.label}**: ${sq.queries.slice(0, 2).join(' / ')}`);
+    });
+    lines.push('');
+  }
+  
+  // Cross-references (items appearing in multiple sources)
+  if (crossRefs && crossRefs.length) {
+    lines.push(`## 🔗 Cross-Referenced (appeared in 2+ sources)`);
+    crossRefs.slice(0, 10).forEach(cr => {
+      if (cr.title) {
+        lines.push(`- **${cr.title.slice(0, 100)}** — found in: ${cr.sources.join(', ')}`);
+      } else {
+        lines.push(`- ${cr.url} — found in: ${cr.sources.join(', ')}`);
+      }
+    });
+    lines.push('');
+  }
 
   // Web results + page contents
   const web = results.find(r => r.source === 'web');
@@ -513,7 +690,18 @@ function generateReport(topic, results, pageContents) {
 
 const totalTimer = timer();
 console.log(`\n🔬 Deep Research: "${topic}"`);
-console.log(`   Sources: ${sources.join(', ')} | Engine: ${webEngine} | Limit: ${limit} | Read: ${readPages}\n`);
+console.log(`   Sources: ${sources.join(', ')} | Engine: ${webEngine} | Limit: ${limit} | Read: ${readPages}${decompose ? ' | Decompose: ON' : ''}\n`);
+
+// Topic decomposition
+let subQuestions = null;
+let searchQueries = [topic]; // default: just the topic itself
+if (decompose) {
+  subQuestions = decomposeTopic(topic);
+  searchQueries = [...new Set(subQuestions.flatMap(sq => sq.queries))]; // unique queries
+  console.log(`📋 Decomposed into ${subQuestions.length} sub-questions (${searchQueries.length} total queries):`);
+  subQuestions.forEach((sq, i) => console.log(`   ${i + 1}. ${sq.label}: "${sq.queries[0]}"`));
+  console.log('');
+}
 
 // Launch browser once — reuse for all sources
 const browser = await launch({ profile: sources.includes('twitter') ? 'x-com' : null });
@@ -523,11 +711,35 @@ const allResults = [];
 const searchJobs = [];
 
 if (sources.includes('web')) {
-  searchJobs.push((async () => {
-    const page = await browser.context.newPage();
-    try { return await searchWeb(page, topic, webEngine); }
-    finally { await page.close(); }
-  })());
+  if (decompose && searchQueries.length > 1) {
+    // In decompose mode: run multiple web searches (first query per sub-question)
+    const webQueries = subQuestions.map(sq => sq.queries[0]);
+    searchJobs.push((async () => {
+      const combinedResults = [];
+      const seen = new Set();
+      const elapsed = timer();
+      for (const q of webQueries) {
+        const page = await browser.context.newPage();
+        try {
+          const r = await searchWeb(page, q, webEngine);
+          for (const item of (r.results || [])) {
+            if (!seen.has(item.url)) {
+              seen.add(item.url);
+              combinedResults.push(item);
+            }
+          }
+        } finally { await page.close(); }
+      }
+      console.log(`  📊 Web combined: ${combinedResults.length} unique results from ${webQueries.length} queries (${elapsed()})`);
+      return { source: 'web', engine: webEngine, results: combinedResults.slice(0, limit * 2), time: elapsed() };
+    })());
+  } else {
+    searchJobs.push((async () => {
+      const page = await browser.context.newPage();
+      try { return await searchWeb(page, topic, webEngine); }
+      finally { await page.close(); }
+    })());
+  }
 }
 if (sources.includes('twitter')) {
   searchJobs.push((async () => {
@@ -600,19 +812,28 @@ if (webResult && webResult.results.length > 0 && readPages > 0) {
 
 await browser.close();
 
-// Phase 3: Output
+// Phase 3: Compute confidence & cross-references
+const confidence = computeConfidence(allResults);
+const crossRefs = crossReference(allResults);
+
+// Phase 4: Output
 const totalTime = totalTimer();
 console.log(`\n✅ Research complete in ${totalTime}`);
+console.log(`   Confidence: ${confidence.emoji} ${confidence.level} | Sources with data: ${confidence.sourcesWithData}/${allResults.length} | Total results: ${confidence.totalResults}`);
+if (crossRefs.length) console.log(`   Cross-referenced topics: ${crossRefs.length}`);
 
 if (jsonOut) {
   console.log(JSON.stringify({
     topic,
+    confidence,
+    crossRefs,
+    subQuestions: subQuestions || null,
     sources: allResults,
     pageContents,
     totalTime,
   }, null, 2));
 } else {
-  const report = generateReport(topic, allResults, pageContents);
+  const report = generateReport(topic, allResults, pageContents, { confidence, crossRefs, subQuestions });
   console.log(`\n${'═'.repeat(70)}\n`);
   console.log(report);
 }

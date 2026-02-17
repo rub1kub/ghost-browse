@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.4.0 (2026-02-17) — Research Intelligence
+
+### NEW: Topic Decomposition (`--decompose`)
+Automatically breaks a broad topic into 5 research sub-questions (Overview, Key Players, Technical Details, Challenges, Future Outlook) and generates 2-3 keyword variations per question for wider search coverage.
+
+```bash
+node deep-research.mjs "impact of AI on healthcare" --decompose
+# Searches with: "impact AI healthcare", "AI healthcare 2026 overview", 
+# "AI healthcare top companies projects", "AI healthcare challenges risks", etc.
+```
+
+In decompose mode, web searches run multiple queries (one per sub-question) and deduplicate results automatically.
+
+### NEW: Confidence Scoring
+Every research report now includes a confidence level based on source coverage:
+- 🟢 **HIGH**: 3+ sources with data, 10+ total results
+- 🟡 **MEDIUM**: 2+ sources, 5+ results  
+- 🔴 **LOW**: single source or sparse results
+
+### NEW: Cross-Reference Detection
+Automatically identifies topics/URLs that appear in 2+ sources (higher credibility). Both exact URL matches and fuzzy title-keyword matches. Cross-referenced items are highlighted at the top of the report.
+
+### Report Format Enhanced
+- Research sub-questions listed in report header (decompose mode)
+- Cross-referenced section before source details
+- Confidence badge in report metadata line
+
+---
+
 ## v2.3.0 (2026-02-17) — Deep Research
 
 ### NEW: `deep-research.mjs`
