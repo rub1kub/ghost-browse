@@ -1,116 +1,115 @@
 ---
 name: ghost-browse
 description: >
-  Stealth browser for web search and page reading. Use when you need to search Google/Bing/DuckDuckGo,
-  read JS-rendered pages, or fetch multiple URLs in parallel without being blocked.
-  Anti-detection: randomized fingerprint, human-like behavior. Faster and stealthier than web_fetch.
+  Stealth browser for web research — search, fetch, and extract from any site.
+  Multi-source deep research: web + Twitter + Reddit + HN + GitHub in one command (~20s).
+  Anti-detection: persistent fingerprint per profile, GUI mode, rate limiting.
+  Use when you need fast, comprehensive research across multiple sources.
 ---
 
 # ghost-browse
 
-Stealth parallel browser for AI agents. Searches the web like a human, reads pages with full JS rendering, runs multiple requests in parallel.
+Stealth browser toolkit for AI agents. One command = research across web, Twitter, Reddit, HackerNews, GitHub.
 
-## Why use this instead of web_fetch?
-
-- **web_fetch** fails on JS-heavy sites (SPAs, React, Vue). ghost-browse renders them fully.
-- **web_fetch** gets blocked easily. ghost-browse randomizes fingerprints and mimics human behavior.
-- **web_fetch** is sequential. ghost-browse batches up to 10 pages in parallel.
-
-## Setup (once)
+## Quick Start
 
 ```bash
-cd skills/ghost-browse
+cd projects/ghost-browse  # or wherever installed
 npm install
-npx playwright install chromium  # if chromium not available
 ```
 
-## Commands
+## Deep Research (recommended)
 
-### Search the web
+One command, all sources, ~20 seconds:
+
 ```bash
-# Google search (default)
-node ghost-browse.mjs search "bitcoin price" --limit 10
+# Full research (web + Twitter + Reddit + HN)
+node deep-research.mjs "AI agents 2026"
 
-# Bing
-node ghost-browse.mjs search "query" --engine bing --limit 5
+# Specific sources
+node deep-research.mjs "TON blockchain" --sources web,twitter,reddit,hn
+node deep-research.mjs "Rust vs Go" --sources web,hn,github
+node deep-research.mjs "OpenAI drama" --sources twitter,reddit
 
-# DuckDuckGo (most anonymous)
-node ghost-browse.mjs search "query" --engine ddg
-
-# JSON output (for programmatic use)
-node ghost-browse.mjs search "query" --json
-```
-
-### Multi-page search (go through pages of results)
-```bash
-# Get results from pages 1-3
-node ghost-browse.mjs pages "query" --pages 3 --engine google
-
-# All results as JSON
-node ghost-browse.mjs pages "topic" --pages 5 --json
-```
-
-### Fetch a single page (full JS render)
-```bash
-node ghost-browse.mjs fetch "https://example.com"
-
-# With scroll (loads lazy content)
-node ghost-browse.mjs fetch "https://example.com" --scroll
-
-# Limit output size
-node ghost-browse.mjs fetch "https://example.com" --max 5000
-
-# JSON with links
-node ghost-browse.mjs fetch "https://example.com" --json
-```
-
-### Batch fetch (parallel)
-```bash
-# Fetch 5 URLs simultaneously
-node ghost-browse.mjs batch "https://site1.com" "https://site2.com" "https://site3.com"
-
-# Control parallelism (default: 5)
-node ghost-browse.mjs batch url1 url2 url3 url4 url5 --concurrency 3
+# Control depth
+node deep-research.mjs "topic" --limit 5 --read 3 --max 2000
 
 # JSON output
-node ghost-browse.mjs batch url1 url2 --json --max 3000
+node deep-research.mjs "topic" --json
 ```
 
-## Output format
+Sources: `web`, `twitter`, `reddit`, `hn`, `github`
 
-### Search result:
-```
-1. Title of the page
-   https://url.com
-   Snippet text here...
-```
+## Individual Commands
 
-### Fetch result:
-```
-📄 Page Title
-🔗 https://url.com
-
-[markdown content of the page]
-
-🔗 Links (12):
-  • Link text: https://linked-url.com
+### Search
+```bash
+node ghost-browse.mjs search "query" --engine ddg --limit 10
+node ghost-browse.mjs search "query" --engine bing --limit 5
+node ghost-browse.mjs search "query" --engine google --limit 10  # auto-loads google profile
 ```
 
-## Anti-detection features
+### Fetch page
+```bash
+node ghost-browse.mjs fetch "https://example.com" --max 5000
+node ghost-browse.mjs fetch "https://example.com" --scroll --screenshot
+node ghost-browse.mjs fetch "https://x.com/home" --profile x-com
+```
 
-- Randomized User-Agent (Chrome, Firefox, Safari on Windows/Mac/Linux)
-- Randomized viewport (1920×1080, 1440×900, 1366×768, etc.)
-- Random timezone (NY, LA, London, Berlin)
-- navigator.webdriver = undefined (undetectable)
-- Chrome object spoofing
-- Human-like delays between actions (800–2500ms)
-- Random scroll patterns
-- Randomized typing speed
+### Batch (parallel)
+```bash
+node ghost-browse.mjs batch "url1" "url2" "url3" --concurrency 5 --max 3000
+```
 
-## Tips
+### Site Extractors (structured data)
+```bash
+node extractors.mjs twitter-timeline --limit 20    # your timeline
+node extractors.mjs twitter-search "query"          # search tweets
+node extractors.mjs reddit-feed programming         # subreddit feed
+node extractors.mjs hackernews top                  # HN front page
+node extractors.mjs github-trending javascript      # trending repos
+node extractors.mjs article "https://..."           # extract article
+```
 
-- For research tasks: use `pages` to get 30+ results across 3 Google pages
-- For competitor analysis: use `batch` to read 10 sites at once
-- For JS-heavy dashboards: use `fetch --scroll` to load lazy content
-- Prefer `--engine ddg` for anonymous searches (no personalization)
-- Use `--json` output when processing results programmatically
+### Research (search + read)
+```bash
+node research.mjs "topic" --limit 5 --engine ddg
+```
+
+### PDF Extract
+```bash
+node pdf-extract.mjs "https://arxiv.org/pdf/1706.03762" --max 5000
+```
+
+### Watch (monitor changes)
+```bash
+node watch.mjs "https://site.com/status" --interval 60 --once
+```
+
+### Server (persistent, 1-2s per request)
+```bash
+node server.mjs --port 3847
+curl localhost:3847/search?q=query
+curl localhost:3847/fetch?url=https://...
+```
+
+## Profiles
+
+Authenticated browsing with cookie profiles:
+
+```bash
+node profile-manager.mjs import-cdp    # extract cookies from Chrome
+node profile-manager.mjs list
+```
+
+Available: `x-com`, `reddit-com`, `google-com`, `chatgpt-com`, `polymarket-com`, etc.
+
+With `--profile`, fingerprint is persistent (same cookies = same browser identity).
+
+## Key Design Decisions
+
+- **GUI mode** (`headless: false` + Xvfb): sites detect headless, not IPs
+- **Persistent fingerprint**: seeded PRNG per profile — no "different browser, same cookies" red flag
+- **Rate limiter**: Google 3/min, Twitter 10/min — prevents IP bans
+- **Error recovery**: if one source fails, others continue
+- **30s timeout per source**: nothing hangs forever

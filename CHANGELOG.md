@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.3.0 (2026-02-17) — Deep Research
+
+### NEW: `deep-research.mjs`
+Multi-source research in one command. Searches web + Twitter + Reddit + HN + GitHub in parallel, reads top pages, produces unified markdown report.
+
+```bash
+node deep-research.mjs "AI agents 2026"                           # all sources
+node deep-research.mjs "TON blockchain" --sources web,twitter,hn  # specific
+node deep-research.mjs "Rust vs Go" --engine bing --limit 10      # customize
+```
+
+**Performance:** ~20s for 4 sources + 2 page reads (one browser launch, parallel tabs).
+
+**Features:**
+- Parallel search across all sources (one persistent context)
+- 30s timeout per source — if one hangs, others complete
+- Reddit: JSON API primary (25+ posts), HTML fallback
+- HN: Algolia search (by popularity, past month)
+- GitHub: search by stars
+- PDF auto-detection: routes to pdf-extract.mjs
+- Markdown report with all results organized by source
+- `--json` for programmatic consumption
+
+**Fixes:**
+- Reddit search now uses JSON API (was returning 0 posts via HTML)
+- Twitter search: inline extraction, more reliable in parallel context
+- Per-source timeout prevents entire research from hanging
+
+---
+
 ## v2.2.0 (2026-02-17) — Architecture Rewrite
 
 ### 🔴 Breaking: Persistent Fingerprint per Profile
