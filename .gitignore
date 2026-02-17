@@ -8,6 +8,5 @@ profiles/*.txt
 .watch-state/
 screenshots/
 captcha-screenshots/
-profiles/*.json
-profiles/*.txt
 .downloads/
+ghost-browse.config.json

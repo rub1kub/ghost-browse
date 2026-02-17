@@ -1,13 +1,52 @@
 /**
- * fingerprint.mjs — Browser fingerprint rotation
- * Generates random but consistent fingerprint sets per session
- * Injects via addInitScript to spoof Canvas, WebGL, AudioContext, fonts, etc.
+ * fingerprint.mjs — Browser fingerprint rotation & persistence
+ * 
+ * Two modes:
+ *   - Anonymous (seed=null): random fingerprint every launch — for search, anonymous fetch
+ *   - Profile (seed="x-com"): deterministic fingerprint from seed — for auth sessions
+ *
+ * Profile mode ensures the same profile always presents the same browser identity,
+ * so sites don't see "same cookies, different browser" = suspicious.
  */
 
-// ─── Random generators ──────────────────────────────────────────────────────
+// ─── Seeded PRNG (Mulberry32) ─────────────────────────────────────────────────
 
-const rand = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
-const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+function seedHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function mulberry32(seed) {
+  let s = seed | 0;
+  return function () {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function createRng(seed) {
+  if (seed === null || seed === undefined) {
+    // True random
+    return {
+      rand: (a, b) => Math.floor(Math.random() * (b - a + 1)) + a,
+      pick: (arr) => arr[Math.floor(Math.random() * arr.length)],
+      float: () => Math.random(),
+    };
+  }
+  const rng = mulberry32(seedHash(String(seed)));
+  return {
+    rand: (a, b) => Math.floor(rng() * (b - a + 1)) + a,
+    pick: (arr) => arr[Math.floor(rng() * arr.length)],
+    float: () => rng(),
+  };
+}
+
+// ─── Fingerprint data pools ──────────────────────────────────────────────────
 
 const GPU_RENDERERS = [
   'ANGLE (NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0)',
@@ -17,8 +56,6 @@ const GPU_RENDERERS = [
   'ANGLE (Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0)',
   'ANGLE (Apple M2 Pro)',
   'ANGLE (AMD Radeon Pro 5500M OpenGL Engine)',
-  'Mali-G78 MC20',
-  'Adreno (TM) 730',
 ];
 
 const GPU_VENDORS = [
@@ -26,8 +63,6 @@ const GPU_VENDORS = [
   'Google Inc. (AMD)',
   'Google Inc. (Intel)',
   'Google Inc. (Apple)',
-  'ARM',
-  'Qualcomm',
 ];
 
 const PLATFORM_COMBOS = [
@@ -53,32 +88,34 @@ const LANGS = [
   ['en-US', 'en', 'es'],
 ];
 
+const TIMEZONES = ['America/New_York', 'America/Los_Angeles', 'America/Chicago', 'Europe/London', 'Europe/Berlin'];
+
 // ─── Generate fingerprint ────────────────────────────────────────────────────
 
-export function generateFingerprint() {
-  const platformCombo = pick(PLATFORM_COMBOS);
-  const canvasNoise = rand(1, 255);  // unique noise seed for canvas
-  const audioNoise = (Math.random() * 0.0001).toFixed(8);
-  const webglRenderer = pick(GPU_RENDERERS);
-  const webglVendor = pick(GPU_VENDORS);
-  const fonts = pick(FONT_SETS);
-  const langs = pick(LANGS);
-  const hardwareConcurrency = pick([2, 4, 6, 8, 12, 16]);
-  const deviceMemory = pick([2, 4, 8, 16]);
-  const maxTouchPoints = pick([0, 0, 0, 1, 5, 10]); // most desktops = 0
+/**
+ * @param {string|null} seed - Profile name for persistent fingerprint, null for random
+ */
+export function generateFingerprint(seed = null) {
+  const rng = createRng(seed);
+  const platformCombo = rng.pick(PLATFORM_COMBOS);
+
+  // Canvas noise: subtle XOR (1-3 bits) instead of large addition
+  const canvasNoiseBits = rng.rand(1, 3);
 
   return {
+    _seed: seed,
+    _timezone: rng.pick(TIMEZONES),
     platform: platformCombo.platform,
     oscpu: platformCombo.oscpu,
-    canvasNoise,
-    audioNoise: parseFloat(audioNoise),
-    webglRenderer,
-    webglVendor,
-    fonts,
-    langs,
-    hardwareConcurrency,
-    deviceMemory,
-    maxTouchPoints,
+    canvasNoiseBits,
+    audioNoise: parseFloat((rng.float() * 0.0001).toFixed(8)),
+    webglRenderer: rng.pick(GPU_RENDERERS),
+    webglVendor: rng.pick(GPU_VENDORS),
+    fonts: rng.pick(FONT_SETS),
+    langs: rng.pick(LANGS),
+    hardwareConcurrency: rng.pick([2, 4, 6, 8, 12, 16]),
+    deviceMemory: rng.pick([2, 4, 8, 16]),
+    maxTouchPoints: rng.pick([0, 0, 0, 1, 5, 10]),
   };
 }
 
@@ -86,16 +123,19 @@ export function generateFingerprint() {
 
 export function getFingerprintScript(fp) {
   return `
-    // ─── Canvas fingerprint noise ─────────────────────────────────
+    // ─── Canvas fingerprint noise (subtle XOR, not visible) ───────
     const _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
     HTMLCanvasElement.prototype.toDataURL = function(type) {
       const ctx = this.getContext('2d');
-      if (ctx) {
-        const imageData = ctx.getImageData(0, 0, this.width, this.height);
-        for (let i = 0; i < imageData.data.length; i += 4) {
-          imageData.data[i] = (imageData.data[i] + ${fp.canvasNoise}) % 256;
-        }
-        ctx.putImageData(imageData, 0, 0);
+      if (ctx && this.width > 0 && this.height > 0) {
+        try {
+          const imageData = ctx.getImageData(0, 0, this.width, this.height);
+          for (let i = 0; i < imageData.data.length; i += 4) {
+            imageData.data[i] ^= ${fp.canvasNoiseBits};     // R — XOR 1-3 bits max
+            imageData.data[i+1] ^= ${fp.canvasNoiseBits};   // G
+          }
+          ctx.putImageData(imageData, 0, 0);
+        } catch(e) {} // CORS canvas will throw
       }
       return _origToDataURL.apply(this, arguments);
     };
@@ -103,12 +143,15 @@ export function getFingerprintScript(fp) {
     const _origToBlob = HTMLCanvasElement.prototype.toBlob;
     HTMLCanvasElement.prototype.toBlob = function(cb, type, quality) {
       const ctx = this.getContext('2d');
-      if (ctx) {
-        const imageData = ctx.getImageData(0, 0, this.width, this.height);
-        for (let i = 0; i < imageData.data.length; i += 4) {
-          imageData.data[i] = (imageData.data[i] + ${fp.canvasNoise}) % 256;
-        }
-        ctx.putImageData(imageData, 0, 0);
+      if (ctx && this.width > 0 && this.height > 0) {
+        try {
+          const imageData = ctx.getImageData(0, 0, this.width, this.height);
+          for (let i = 0; i < imageData.data.length; i += 4) {
+            imageData.data[i] ^= ${fp.canvasNoiseBits};
+            imageData.data[i+1] ^= ${fp.canvasNoiseBits};
+          }
+          ctx.putImageData(imageData, 0, 0);
+        } catch(e) {}
       }
       return _origToBlob.apply(this, arguments);
     };
@@ -116,8 +159,8 @@ export function getFingerprintScript(fp) {
     // ─── WebGL fingerprint ────────────────────────────────────────
     const _getParameter = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function(param) {
-      if (param === 37445) return '${fp.webglVendor}';        // UNMASKED_VENDOR
-      if (param === 37446) return '${fp.webglRenderer}';      // UNMASKED_RENDERER
+      if (param === 37445) return '${fp.webglVendor}';
+      if (param === 37446) return '${fp.webglRenderer}';
       return _getParameter.apply(this, arguments);
     };
     if (typeof WebGL2RenderingContext !== 'undefined') {
@@ -154,7 +197,7 @@ export function getFingerprintScript(fp) {
     Object.defineProperty(navigator, 'maxTouchPoints', { get: () => ${fp.maxTouchPoints} });
     Object.defineProperty(navigator, 'languages', { get: () => ${JSON.stringify(fp.langs)} });
 
-    // ─── webdriver = undefined (already done but reinforce) ───────
+    // ─── Anti-detection basics ────────────────────────────────────
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     delete window.__playwright;
     window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };

@@ -1,19 +1,12 @@
 #!/usr/bin/env node
 /**
  * research.mjs — Search + read + summarize in one command
- * Usage: node research.mjs "topic" [--limit 5] [--engine google|ddg|bing] [--max 3000] [--json]
+ * Usage: node research.mjs "topic" [--limit 5] [--engine google|ddg|bing] [--max 3000] [--profile name] [--json]
  */
 process.env.DISPLAY = process.env.DISPLAY || ':99';
 
-import { chromium } from 'playwright';
-import { execSync } from 'child_process';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
-import { tmpdir } from 'os';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dir = dirname(fileURLToPath(import.meta.url));
-const REAL_USER_DATA = '/home/openclawd/.openclaw/browser/openclaw/user-data';
+import { launch } from './browser-launcher.mjs';
+import { waitForSlot } from './rate-limiter.mjs';
 
 function getArg(args, name, def) {
   const i = args.indexOf(`--${name}`);
@@ -21,25 +14,6 @@ function getArg(args, name, def) {
   const eq = args.find(a => a.startsWith(`--${name}=`));
   if (eq) return eq.split('=').slice(1).join('=');
   return def;
-}
-
-async function launchContext() {
-  const tmp = mkdtempSync(`${tmpdir()}/ghost-research-`);
-  execSync(`cp -r "${REAL_USER_DATA}/." "${tmp}" 2>/dev/null; rm -f "${tmp}/SingletonLock" "${tmp}/SingletonCookie" "${tmp}/SingletonSocket"`, { timeout: 15000 });
-  const ctx = await chromium.launchPersistentContext(tmp, {
-    headless: false,
-    executablePath: '/usr/bin/google-chrome-stable',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--no-first-run'],
-    env: { ...process.env, DISPLAY: process.env.DISPLAY },
-    viewport: { width: 1440, height: 900 },
-  });
-  await ctx.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    window.chrome = { runtime: {} };
-  });
-  const origClose = ctx.close.bind(ctx);
-  ctx.close = async () => { await origClose(); try { rmSync(tmp, { recursive: true, force: true }); } catch {} };
-  return ctx;
 }
 
 function htmlToText(html) {
@@ -52,7 +26,22 @@ function htmlToText(html) {
     .trim();
 }
 
+// ─── Bing URL decoder ─────────────────────────────────────────────────────────
+
+function decodeBingUrl(url) {
+  if (!url || !url.includes('bing.com/ck/')) return url;
+  try {
+    const match = url.match(/[&?]u=a1([^&]+)/);
+    if (match) {
+      const decoded = Buffer.from(match[1], 'base64url').toString('utf8');
+      if (decoded.startsWith('http')) return decoded;
+    }
+  } catch {}
+  return url;
+}
+
 async function searchDDG(page, query) {
+  await waitForSlot('duckduckgo.com');
   await page.goto(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await new Promise(r => setTimeout(r, 1500));
   const raw = await page.evaluate(() => {
@@ -68,9 +57,9 @@ async function searchDDG(page, query) {
 }
 
 async function searchGoogle(page, query) {
+  await waitForSlot('google.com');
   await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await new Promise(r => setTimeout(r, 2000));
-  // Dismiss cookie banner
   for (const sel of ['#L2AGLb', 'button[aria-label*="Reject"]']) { try { const b = await page.$(sel); if (b) { await b.click(); await new Promise(r => setTimeout(r, 800)); } } catch {} }
   await new Promise(r => setTimeout(r, 1000));
   return await page.evaluate(() => {
@@ -86,8 +75,25 @@ async function searchGoogle(page, query) {
   });
 }
 
+async function searchBing(page, query) {
+  await waitForSlot('bing.com');
+  await page.goto(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await new Promise(r => setTimeout(r, 1500));
+  const raw = await page.evaluate(() => {
+    const items = [];
+    document.querySelectorAll('li.b_algo').forEach(el => {
+      const t = el.querySelector('h2 a');
+      const s = el.querySelector('.b_caption p, .b_algoSlug');
+      if (t) items.push({ title: t.textContent.trim(), url: t.href, snippet: s?.textContent?.trim() || '' });
+    });
+    return items;
+  });
+  return raw.map(r => ({ ...r, url: decodeBingUrl(r.url) }));
+}
+
 async function fetchPageContent(page, url, maxChars = 4000) {
   try {
+    await waitForSlot(url);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await new Promise(r => setTimeout(r, 1500));
     const result = await page.evaluate(() => {
@@ -111,12 +117,13 @@ const engine = getArg(args, 'engine', 'ddg');
 const maxChars = parseInt(getArg(args, 'max', '3000'));
 const jsonOut = args.includes('--json');
 const concurrency = parseInt(getArg(args, 'concurrency', '3'));
+const profile = getArg(args, 'profile', engine === 'google' ? 'google-com' : null);
 
 if (!query) {
   console.log(`
 research.mjs — Search + read top results in one command
 
-Usage: node research.mjs "topic" [--limit 5] [--engine google|ddg] [--max 3000] [--concurrency 3] [--json]
+Usage: node research.mjs "topic" [--limit 5] [--engine google|ddg|bing] [--max 3000] [--profile name] [--json]
 
 Examples:
   node research.mjs "TON blockchain news 2026"
@@ -128,24 +135,23 @@ Examples:
 
 console.log(`\n🔍 Researching: "${query}" [${engine}] — reading top ${limit} results...\n`);
 
-const ctx = await launchContext();
-const searchPage = await ctx.newPage();
+const browser = await launch({ profile });
+const searchPage = await browser.context.newPage();
 
-// Step 1: Search
 let searchResults;
 if (engine === 'google') searchResults = await searchGoogle(searchPage, query);
+else if (engine === 'bing') searchResults = await searchBing(searchPage, query);
 else searchResults = await searchDDG(searchPage, query);
 
 const urls = searchResults.slice(0, limit);
 console.log(`Found ${searchResults.length} results, reading top ${urls.length}...\n`);
 await searchPage.close();
 
-// Step 2: Fetch pages in parallel (batched)
 const allResults = [];
 for (let i = 0; i < urls.length; i += concurrency) {
   const batch = urls.slice(i, i + concurrency);
   const fetched = await Promise.allSettled(batch.map(async (sr) => {
-    const page = await ctx.newPage();
+    const page = await browser.context.newPage();
     const result = await fetchPageContent(page, sr.url, maxChars);
     await page.close();
     return { ...sr, ...result };
@@ -156,9 +162,8 @@ for (let i = 0; i < urls.length; i += concurrency) {
   });
 }
 
-await ctx.close();
+await browser.close();
 
-// Step 3: Output
 if (jsonOut) {
   console.log(JSON.stringify(allResults, null, 2));
 } else {

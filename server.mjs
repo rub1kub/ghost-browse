@@ -4,50 +4,48 @@
  * Keeps Chrome running between calls — saves 3-5s per request
  *
  * Usage:
- *   node server.mjs [--port 3847]          # start server
- *   curl localhost:3847/search?q=query      # search
- *   curl localhost:3847/fetch?url=https://  # fetch page
- *   curl localhost:3847/status              # status
- *   curl -X POST localhost:3847/stop        # stop server
+ *   node server.mjs [--port 3847]
+ *   curl localhost:3847/search?q=query
+ *   curl localhost:3847/fetch?url=https://...
+ *   curl localhost:3847/status
+ *   curl -X POST localhost:3847/stop
  */
 process.env.DISPLAY = process.env.DISPLAY || ':99';
 
 import http from 'http';
 import { URL } from 'url';
-import { chromium } from 'playwright';
-import { execSync } from 'child_process';
-import { mkdtempSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
+import { launch } from './browser-launcher.mjs';
 import { getCached, setCache, cacheStats } from './cache.mjs';
+import { waitForSlot, getStatus as getRateLimitStatus } from './rate-limiter.mjs';
+import { loadConfig } from './config.mjs';
 
-const PORT = parseInt(process.argv.find((a, i) => process.argv[i-1] === '--port') || '3847');
-const REAL_USER_DATA = '/home/openclawd/.openclaw/browser/openclaw/user-data';
+const config = loadConfig();
+const PORT = parseInt(process.argv.find((a, i) => process.argv[i - 1] === '--port') || config.serverPort || '3847');
 
-let ctx = null;
+let browser = null;
 let requestCount = 0;
 let startTime = Date.now();
 
-async function getContext() {
-  if (ctx) return ctx;
+// ─── Bing URL decoder ─────────────────────────────────────────────────────────
+
+function decodeBingUrl(url) {
+  if (!url || !url.includes('bing.com/ck/')) return url;
+  try {
+    const match = url.match(/[&?]u=a1([^&]+)/);
+    if (match) {
+      const decoded = Buffer.from(match[1], 'base64url').toString('utf8');
+      if (decoded.startsWith('http')) return decoded;
+    }
+  } catch {}
+  return url;
+}
+
+async function getBrowser() {
+  if (browser) return browser;
   console.log('🚀 Launching persistent browser...');
-  const tmp = mkdtempSync(`${tmpdir()}/ghost-server-`);
-  execSync(`cp -r "${REAL_USER_DATA}/." "${tmp}" 2>/dev/null; rm -f "${tmp}/SingletonLock" "${tmp}/SingletonCookie" "${tmp}/SingletonSocket"`, { timeout: 15000 });
-  ctx = await chromium.launchPersistentContext(tmp, {
-    headless: false,
-    executablePath: '/usr/bin/google-chrome-stable',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--no-first-run'],
-    env: { ...process.env, DISPLAY: process.env.DISPLAY },
-    viewport: { width: 1440, height: 900 },
-  });
-  await ctx.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    window.chrome = { runtime: {} };
-  });
-  const origClose = ctx.close.bind(ctx);
-  ctx._tmpDir = tmp;
-  ctx.close = async () => { await origClose(); try { rmSync(tmp, { recursive: true, force: true }); } catch {} ctx = null; };
+  browser = await launch();
   console.log('✅ Browser ready');
-  return ctx;
+  return browser;
 }
 
 function htmlToText(html) {
@@ -55,10 +53,11 @@ function htmlToText(html) {
 }
 
 async function handleSearch(q, engine = 'ddg', limit = 10) {
-  const context = await getContext();
+  const { context } = await getBrowser();
   const page = await context.newPage();
   try {
     if (engine === 'ddg') {
+      await waitForSlot('duckduckgo.com');
       await page.goto(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await new Promise(r => setTimeout(r, 1500));
       const raw = await page.evaluate(() => {
@@ -71,8 +70,23 @@ async function handleSearch(q, engine = 'ddg', limit = 10) {
         return items;
       });
       return raw.map(r => { try { const m = r.url.match(/uddg=([^&]+)/); if (m) r.url = decodeURIComponent(m[1]); } catch {} return r; }).filter(r => !r.url.includes('duckduckgo.com')).slice(0, limit);
+    } else if (engine === 'bing') {
+      await waitForSlot('bing.com');
+      await page.goto(`https://www.bing.com/search?q=${encodeURIComponent(q)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await new Promise(r => setTimeout(r, 1500));
+      const raw = await page.evaluate(() => {
+        const items = [];
+        document.querySelectorAll('li.b_algo').forEach(el => {
+          const t = el.querySelector('h2 a');
+          const s = el.querySelector('.b_caption p, .b_algoSlug');
+          if (t) items.push({ title: t.textContent.trim(), url: t.href, snippet: s?.textContent?.trim() || '' });
+        });
+        return items;
+      });
+      return raw.map(r => ({ ...r, url: decodeBingUrl(r.url) })).slice(0, limit);
     }
     // Google
+    await waitForSlot('google.com');
     await page.goto(`https://www.google.com/search?q=${encodeURIComponent(q)}&hl=en`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await new Promise(r => setTimeout(r, 2000));
     for (const sel of ['#L2AGLb', 'button[aria-label*="Reject"]']) { try { const b = await page.$(sel); if (b) { await b.click(); } } catch {} }
@@ -91,18 +105,18 @@ async function handleSearch(q, engine = 'ddg', limit = 10) {
 }
 
 async function handleFetch(url, maxChars = 8000, ttlMs = 600000) {
-  // Check cache first
   const cached = getCached(url, ttlMs);
   if (cached) return { ...cached, fromCache: true };
 
-  const context = await getContext();
+  await waitForSlot(url);
+  const { context } = await getBrowser();
   const page = await context.newPage();
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     await new Promise(r => setTimeout(r, 1500));
     const result = await page.evaluate(() => {
       const clone = document.body.cloneNode(true);
-      ['script','style','nav','footer','header','aside','iframe','noscript'].forEach(t => clone.querySelectorAll(t).forEach(e => e.remove()));
+      ['script', 'style', 'nav', 'footer', 'header', 'aside', 'iframe', 'noscript'].forEach(t => clone.querySelectorAll(t).forEach(e => e.remove()));
       return { title: document.title, html: clone.innerHTML, url: window.location.href };
     });
     const content = htmlToText(result.html).slice(0, maxChars);
@@ -135,16 +149,19 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(result));
     } else if (path === '/status') {
       const cache = cacheStats();
+      const rateLimit = getRateLimitStatus();
       res.end(JSON.stringify({
         status: 'running',
-        browserActive: !!ctx,
+        browserActive: !!browser,
         requestCount,
         uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
         cache,
+        rateLimit,
+        fingerprint: browser?.fingerprint?._seed ? 'profile' : 'anonymous',
       }));
     } else if (path === '/stop' && req.method === 'POST') {
       res.end(JSON.stringify({ status: 'stopping' }));
-      if (ctx) await ctx.close();
+      if (browser) await browser.close();
       server.close();
       process.exit(0);
     } else {
@@ -159,7 +176,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`👻 ghost-browse server running on http://localhost:${PORT}`);
-  console.log(`  GET /search?q=query&engine=ddg&limit=10`);
+  console.log(`  GET /search?q=query&engine=ddg|bing|google&limit=10`);
   console.log(`  GET /fetch?url=https://...&max=8000`);
   console.log(`  GET /status`);
   console.log(`  POST /stop`);
