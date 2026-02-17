@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// GUI mode requires Xvfb — set DISPLAY before anything else
+process.env.DISPLAY = process.env.DISPLAY || ':99';
+
 /**
  * ghost-browse — stealth parallel browser for AI agents
  * Searches Google/Bing/DDG, fetches JS-rendered pages, runs in parallel.
@@ -126,28 +129,83 @@ function htmlToMarkdown(html) {
 
 // ─── Browser factory ──────────────────────────────────────────────────────────
 
-async function launchBrowser(opts = {}) {
-  const execPath = process.env.CHROME_PATH || '/home/openclawd/.openclaw/bin/chrome-xvfb';
-  const proxy = opts.proxy || nextProxy();
+const REAL_USER_DATA = '/home/openclawd/.openclaw/browser/openclaw/user-data';
+import { execSync as _execSync } from 'child_process';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 
-  const launchOpts = {
-    headless: true,
-    executablePath: existsSync(execPath) ? execPath : undefined,
+function copyUserData() {
+  // Copy Chrome profile to temp dir (avoids SingletonLock conflicts)
+  const tmp = mkdtempSync(join(tmpdir(), 'ghost-browse-'));
+  _execSync(`cp -r "${REAL_USER_DATA}/." "${tmp}" 2>/dev/null; rm -f "${tmp}/SingletonLock" "${tmp}/SingletonCookie" "${tmp}/SingletonSocket"`, { timeout: 15000 });
+  return tmp;
+}
+
+async function launchBrowser(opts = {}) {
+  // GUI mode via Xvfb — full Chrome, not headless, looks 100% real to Google/Twitter/Reddit
+  process.env.DISPLAY = process.env.DISPLAY || ':99';
+  const proxy = opts.proxy || nextProxy();
+  const vp = opts.viewport || pick(VIEWPORTS);
+
+  // Copy profile to avoid SingletonLock conflict with OpenClaw browser
+  const profileDir = copyUserData();
+
+  const ctxOpts = {
+    headless: false,
+    executablePath: '/usr/bin/google-chrome-stable',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-web-security',
       '--disable-dev-shm-usage',
       '--no-first-run',
-      '--no-zygote',
-      '--window-size=1920,1080',
+      '--no-default-browser-check',
+      '--disable-infobars',
+      `--window-size=${vp.width},${vp.height}`,
     ],
+    env: { ...process.env, DISPLAY: process.env.DISPLAY || ':99' },
+    viewport: vp,
+    locale: 'en-US',
+    timezoneId: pick(['America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin']),
   };
-  if (proxy) launchOpts.proxy = proxy;
+  if (proxy) ctxOpts.proxy = proxy;
 
-  return await chromium.launch(launchOpts);
+  const context = await chromium.launchPersistentContext(profileDir, ctxOpts);
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    delete window.__playwright;
+    delete window.__pw_manual;
+    window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };
+  });
+
+  // Cleanup temp dir on close
+  const origClose = context.close.bind(context);
+  context.close = async () => {
+    await origClose();
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch {}
+  };
+
+  return {
+    _context: context,
+    _profileDir: profileDir,
+    newContext: async () => context,
+    close: async () => context.close(),
+    isConnected: () => true,
+  };
+}
+
+// Override newStealthContext to work with the wrapper
+async function newContextFromBrowser(browser, opts = {}) {
+  if (browser._context) {
+    const ctx = browser._context;
+    if (opts.profile) {
+      const profile = loadProfile(opts.profile);
+      if (profile?.cookies?.length) {
+        try { await ctx.addCookies(profile.cookies); } catch {}
+      }
+    }
+    return ctx;
+  }
+  return await newStealthContext(browser, opts);
 }
 
 function loadProfile(name) {
@@ -219,33 +277,63 @@ async function humanScroll(page, amount = null) {
 
 // ─── Search engines ───────────────────────────────────────────────────────────
 
+async function dismissCookieBanner(page) {
+  // Auto-close GDPR/cookie banners (Google, Reddit, etc.)
+  const selectors = [
+    'button[aria-label="Reject all"]',
+    'button[aria-label="Accept all"]',
+    '#L2AGLb', // Google "Accept all" button id
+    'button:has-text("Reject all")',
+    'button:has-text("Accept all")',
+    'button:has-text("I agree")',
+    '.cookie-consent button',
+    '[data-testid="cookie-banner"] button',
+  ];
+  for (const sel of selectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) {
+        await btn.click();
+        await randomDelay(500, 1000);
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
 async function searchGoogle(page, query, pageNum = 1) {
   const url = SEARCH_URLS.google(query, pageNum);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await randomDelay(800, 1800);
+  await randomDelay(800, 1500);
+
+  // Dismiss cookie consent popup
+  await dismissCookieBanner(page);
+  await randomDelay(500, 1000);
 
   const results = await page.evaluate(() => {
     const items = [];
-    // Standard results
-    document.querySelectorAll('div.g, div[data-hveid]').forEach(el => {
-      const linkEl = el.querySelector('a[href^="http"]');
-      const titleEl = el.querySelector('h3');
-      const snippetEl = el.querySelector('.VwiC3b, [data-sncf], .IsZvec span');
-      if (linkEl && titleEl) {
-        const url = linkEl.href;
-        if (!url.includes('google.com') && !url.includes('googleusercontent')) {
-          items.push({
-            title: titleEl.textContent.trim(),
-            url,
-            snippet: snippetEl ? snippetEl.textContent.trim() : '',
-          });
-        }
-      }
+    // Extract all h3 headings inside links (works regardless of Google's class names)
+    document.querySelectorAll('h3').forEach(h3 => {
+      const link = h3.closest('a');
+      if (!link) return;
+      const href = link.href;
+      if (!href || href.includes('google.com') || href.includes('googleusercontent') || href.startsWith('#')) return;
+
+      // Get snippet — text near the result
+      const container = h3.closest('[data-ved], .g, [data-hveid], .MjjYud > div') || h3.parentElement?.parentElement;
+      const snippetEl = container?.querySelector('.VwiC3b, .yDYNvb, [data-sncf], span[style*="-webkit-line-clamp"]');
+
+      items.push({
+        title: h3.textContent.trim(),
+        url: href,
+        snippet: snippetEl?.textContent?.trim() || '',
+      });
     });
     return items;
   });
 
-  return results.filter(r => r.url && r.title);
+  return results.filter(r => r.url && r.title && !r.url.includes('google.com'));
 }
 
 async function searchBing(page, query, pageNum = 1) {
@@ -304,12 +392,13 @@ async function searchDDG(page, query, pageNum = 1) {
 // ─── Page fetch ───────────────────────────────────────────────────────────────
 
 async function fetchPage(browser, url, opts = {}) {
-  const context = await newStealthContext(browser, { profile: opts.profile });
+  const context = await newContextFromBrowser(browser, { profile: opts.profile });
   const page = await context.newPage();
 
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await randomDelay(500, 1200);
+    await dismissCookieBanner(page);
 
     // Captcha check
     const captchaDetected = await isCaptcha(page);
@@ -369,7 +458,8 @@ async function fetchPage(browser, url, opts = {}) {
 
     return result;
   } finally {
-    await context.close();
+    // Don't close persistent context — just close the page
+    try { await page.close(); } catch {}
   }
 }
 
@@ -390,14 +480,16 @@ async function cmdSearch(args) {
   const engine = getArg(args, 'engine', 'ddg');
   const jsonOut = args.includes('--json');
 
-  const profile = getArg(args, 'profile', null);
+  // Auto-load google-com profile for google engine (handles login + no captcha)
+  const defaultProfile = engine === 'google' ? 'google-com' : null;
+  const profile = getArg(args, 'profile', defaultProfile);
   const proxy = getArg(args, 'proxy', null);
   const retries = parseInt(getArg(args, 'retries', '2'));
   if (proxy) loadProxies(proxy);
   if (!query) { console.error('Usage: ghost-browse search "query" [--limit N] [--engine google|bing|ddg] [--profile name] [--proxy url]'); process.exit(1); }
 
   const browser = await launchBrowser();
-  const context = await newStealthContext(browser, { profile });
+  const context = await newContextFromBrowser(browser, { profile });
   const page = await context.newPage();
 
   try {
@@ -420,7 +512,7 @@ async function cmdSearch(args) {
       });
     }
   } finally {
-    await context.close();
+    try { await page.close(); } catch {}
     await browser.close();
   }
 }
@@ -512,7 +604,7 @@ async function cmdPages(args) {
   if (!query) { console.error('Usage: ghost-browse pages "query" [--pages N] [--engine google|bing|ddg]'); process.exit(1); }
 
   const browser = await launchBrowser();
-  const context = await newStealthContext(browser);
+  const context = await newContextFromBrowser(browser);
   const page = await context.newPage();
   const allResults = [];
 

@@ -7,7 +7,14 @@
 // ─── Twitter / X ─────────────────────────────────────────────────────────────
 
 export async function extractTwitterTimeline(page, opts = {}) {
-  await page.waitForSelector('[data-testid="tweet"]', { timeout: 15000 }).catch(() => {});
+  // If called as standalone, navigate first
+  if (!page.url().includes('x.com') && !page.url().includes('twitter.com')) {
+    await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  }
+  await Promise.race([
+    page.waitForSelector('[data-testid="tweet"]', { timeout: 12000 }),
+    new Promise(r => setTimeout(r, 10000)),
+  ]);
   await new Promise(r => setTimeout(r, 2000));
 
   return await page.evaluate(() => {
@@ -46,31 +53,61 @@ export async function extractTwitterTimeline(page, opts = {}) {
 export async function extractTwitterSearch(page, query) {
   const searchUrl = `https://x.com/search?q=${encodeURIComponent(query)}&src=typed_query&f=live`;
   await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await new Promise(r => setTimeout(r, 3000));
+  await Promise.race([
+    page.waitForSelector('[data-testid="tweet"]', { timeout: 12000 }),
+    new Promise(r => setTimeout(r, 10000)),
+  ]);
+  await new Promise(r => setTimeout(r, 2000));
   return extractTwitterTimeline(page);
 }
 
 // ─── Reddit ──────────────────────────────────────────────────────────────────
 
 export async function extractRedditFeed(page, subreddit = '', sort = 'hot') {
-  // Use Reddit's JSON API for reliability
-  const url = subreddit
-    ? `https://www.reddit.com/r/${subreddit}/${sort}/.json?limit=25`
-    : `https://www.reddit.com/${sort}/.json?limit=25`;
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await new Promise(r => setTimeout(r, 1500));
+  // Reddit HTML (shreddit web components) — works with GUI mode
+  const htmlUrl = subreddit
+    ? `https://www.reddit.com/r/${subreddit}/${sort}/`
+    : `https://www.reddit.com/${sort}/`;
 
-  // Parse JSON API response
-  const jsonText = await page.evaluate(() => {
-    try {
-      const pre = document.querySelector('pre');
-      return pre ? pre.textContent : document.body.innerText;
-    } catch { return ''; }
+  await page.goto(htmlUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+  // Wait for shreddit-post web components to render
+  await Promise.race([
+    page.waitForSelector('shreddit-post', { timeout: 10000 }),
+    new Promise(r => setTimeout(r, 8000)),
+  ]);
+
+  const posts = await page.evaluate(() => {
+    const results = [];
+    document.querySelectorAll('shreddit-post').forEach(el => {
+      const permalink = el.getAttribute('permalink') || '';
+      results.push({
+        title: el.getAttribute('post-title') || '',
+        url: el.getAttribute('content-href') || el.getAttribute('source-url') || (permalink ? `https://reddit.com${permalink}` : ''),
+        commentsUrl: permalink ? `https://reddit.com${permalink}` : '',
+        subreddit: el.getAttribute('subreddit-prefixed-name') || '',
+        author: el.getAttribute('author') ? `u/${el.getAttribute('author')}` : '',
+        score: parseInt(el.getAttribute('score') || '0'),
+        comments: parseInt(el.getAttribute('comment-count') || '0'),
+        time: el.getAttribute('created-timestamp') || null,
+        flair: el.getAttribute('flair-text') || null,
+      });
+    });
+    return results;
   });
 
+  if (posts.length > 0) return posts.filter(p => p.title);
+
+  // Fallback: try JSON API (works if not blocked)
   try {
+    const jsonUrl = subreddit
+      ? `https://www.reddit.com/r/${subreddit}/${sort}/.json?limit=25`
+      : `https://www.reddit.com/${sort}/.json?limit=25`;
+    await page.goto(jsonUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await new Promise(r => setTimeout(r, 1500));
+    const jsonText = await page.evaluate(() => document.querySelector('pre')?.textContent || document.body.innerText);
     const data = JSON.parse(jsonText);
-    const posts = (data?.data?.children || []).map(({ data: p }) => ({
+    return (data?.data?.children || []).map(({ data: p }) => ({
       title: p.title,
       url: p.url?.startsWith('/r/') ? `https://reddit.com${p.url}` : p.url,
       commentsUrl: `https://reddit.com${p.permalink}`,
@@ -80,8 +117,7 @@ export async function extractRedditFeed(page, subreddit = '', sort = 'hot') {
       comments: p.num_comments,
       time: p.created_utc ? new Date(p.created_utc * 1000).toISOString() : null,
       flair: p.link_flair_text,
-    }));
-    return posts.filter(p => p.title);
+    })).filter(p => p.title);
   } catch {
     return [];
   }
@@ -214,27 +250,29 @@ const EXTRACTORS = {
 };
 
 if (process.argv[1]?.endsWith('extractors.mjs')) {
+  process.env.DISPLAY = process.env.DISPLAY || ':99';
+
   const [,, extractor, ...args] = process.argv;
 
   if (!extractor || !EXTRACTORS[extractor]) {
     console.log(`
-extractors.mjs — Site-specific extractors
+extractors.mjs — Site-specific extractors (GUI mode, anti-detect)
 
 Available:
-  twitter-timeline          Fetch your X/Twitter home timeline (needs --profile x-com)
-  twitter-search "query"    Search Twitter
+  twitter-timeline          Fetch your X/Twitter home timeline
+  twitter-search "query"    Search Twitter  
   reddit-feed [subreddit]   Reddit feed (hot posts)
   reddit-comments <url>     Comments on a Reddit post
   hackernews [top|new|ask]  HackerNews front page
   github-trending [lang]    GitHub trending repos
   article <url>             Extract article content
 
-Flags: --profile <name> --json --limit N
+Flags: --json --limit N
 
 Examples:
-  node extractors.mjs twitter-timeline --profile x-com --limit 20
-  node extractors.mjs reddit-feed programming --profile reddit-com
-  node extractors.mjs twitter-search "TON blockchain" --profile x-com
+  node extractors.mjs twitter-timeline --limit 20
+  node extractors.mjs reddit-feed programming
+  node extractors.mjs twitter-search "TON blockchain"
   node extractors.mjs hackernews top
   node extractors.mjs github-trending javascript
 `);
@@ -242,57 +280,49 @@ Examples:
   }
 
   const { chromium } = await import('playwright');
-  const { existsSync, readFileSync } = await import('fs');
-  const { join, dirname } = await import('path');
   const { fileURLToPath } = await import('url');
-
+  const { dirname } = await import('path');
   const __dir = dirname(fileURLToPath(import.meta.url));
 
-  const profileName = args.find((a, i) => args[i-1] === '--profile') || args.find(a => a === '--profile' ? args[args.indexOf(a)+1] : false);
   const jsonOut = args.includes('--json');
-  const limit = parseInt(args.find((a, i) => args[i-1] === '--limit') || '50');
-
-  // Simple arg parsing
-  let profileArg = null;
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--profile' && args[i+1]) { profileArg = args[i+1]; break; }
-  }
-
-  let profileData = null;
-  if (profileArg) {
-    const pPath = join(__dir, 'profiles', `${profileArg}.json`);
-    if (existsSync(pPath)) profileData = JSON.parse(readFileSync(pPath, 'utf8'));
-    else console.warn(`Profile "${profileArg}" not found`);
-  }
-
-  const browser = await chromium.launch({
-    headless: true,
-    executablePath: existsSync('/home/openclawd/.openclaw/bin/chrome-xvfb') ? '/home/openclawd/.openclaw/bin/chrome-xvfb' : undefined,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+  const limitIdx = args.indexOf('--limit');
+  const limit = limitIdx !== -1 ? parseInt(args[limitIdx + 1]) : 50;
+  // Positional args: exclude flags and their values
+  const positionalArgs = args.filter((a, i) => {
+    if (a.startsWith('--')) return false;
+    if (i > 0 && args[i-1].startsWith('--')) return false; // value of a flag
+    return true;
   });
 
-  const ctxOpts = {
-    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  // Copy real user-data to avoid SingletonLock conflict, then launch GUI Chrome
+  const REAL_USER_DATA = '/home/openclawd/.openclaw/browser/openclaw/user-data';
+  const { execSync } = await import('child_process');
+  const { mkdtempSync, rmSync } = await import('fs');
+  const { tmpdir } = await import('os');
+  const tmpProfile = mkdtempSync(`${tmpdir()}/ghost-ext-`);
+  execSync(`cp -r "${REAL_USER_DATA}/." "${tmpProfile}" 2>/dev/null; rm -f "${tmpProfile}/SingletonLock" "${tmpProfile}/SingletonCookie" "${tmpProfile}/SingletonSocket"`, { timeout: 15000 });
+
+  const context = await chromium.launchPersistentContext(tmpProfile, {
+    headless: false,
+    executablePath: '/usr/bin/google-chrome-stable',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--no-first-run'],
+    env: { ...process.env, DISPLAY: process.env.DISPLAY },
     viewport: { width: 1440, height: 900 },
     locale: 'en-US',
-  };
-  if (profileData?.cookies) {
-    ctxOpts.storageState = { cookies: profileData.cookies, origins: [] };
-  }
-
-  const context = await browser.newContext(ctxOpts);
+  });
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    window.chrome = { runtime: {} };
+    window.chrome = { runtime: {}, loadTimes: () => {} };
   });
 
   const page = await context.newPage();
-  const positionalArgs = args.filter(a => !a.startsWith('--') && a !== profileArg);
 
   let result;
   try {
-    if (extractor === 'twitter-timeline') result = await extractTwitterTimeline(page);
-    else if (extractor === 'twitter-search') result = await extractTwitterSearch(page, positionalArgs[0] || 'trending');
+    if (extractor === 'twitter-timeline') {
+      await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      result = await extractTwitterTimeline(page);
+    } else if (extractor === 'twitter-search') result = await extractTwitterSearch(page, positionalArgs[0] || 'trending');
     else if (extractor === 'reddit-feed') result = await extractRedditFeed(page, positionalArgs[0] || '', positionalArgs[1] || 'hot');
     else if (extractor === 'reddit-comments') result = await extractRedditComments(page, positionalArgs[0]);
     else if (extractor === 'hackernews') result = await extractHackerNews(page, positionalArgs[0] || 'top');
@@ -308,7 +338,7 @@ Examples:
       if (Array.isArray(result)) {
         result.forEach((r, i) => {
           console.log(`${i+1}. ${r.title || r.text?.slice(0,100) || r.name || r.body?.slice(0,80) || JSON.stringify(r).slice(0,100)}`);
-          if (r.url) console.log(`   ${r.url}`);
+          if (r.url || r.commentsUrl) console.log(`   ${r.url || r.commentsUrl}`);
           if (r.score || r.points || r.likes) console.log(`   ⭐ ${r.score || r.points || r.likes} | 💬 ${r.comments || r.replies || '0'}`);
           console.log();
         });
@@ -317,6 +347,8 @@ Examples:
       }
     }
   } finally {
-    await browser.close();
+    try { await page.close(); } catch {}
+    await context.close();
+    try { rmSync(tmpProfile, { recursive: true, force: true }); } catch {}
   }
 }
