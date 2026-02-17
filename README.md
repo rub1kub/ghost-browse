@@ -1,116 +1,77 @@
 # ghost-browse 👻
 
-**Stealth parallel browser for AI agents.** Searches Google/Bing/DuckDuckGo, reads JS-rendered pages, fetches multiple URLs in parallel — without bot detection.
+**Stealth browser toolkit for AI agents.** GUI mode via Xvfb — undetectable by Google, Twitter, Reddit. Full Chrome profile for authenticated browsing.
 
 Built for [OpenClaw](https://github.com/openclaw/openclaw) agents. Works standalone.
 
-> **Key insight:** Google/Twitter/Reddit don't ban VPS IPs — they ban **headless browsers**. ghost-browse runs in **GUI mode via Xvfb** (virtual display) and uses your real Chrome profile, making it indistinguishable from a human user.
+> **Key insight:** Sites ban **headless browsers**, not VPS IPs. ghost-browse runs in **GUI mode** (Xvfb virtual display) with your **real Chrome profile** — indistinguishable from a human.
 
 ## Features
 
-- 🖥️ **GUI mode** — `headless: false` + Xvfb virtual display, undetectable by Google/Twitter/Reddit
-- 🔐 **Real session** — copies your Chrome profile for full auth, cookies, fingerprint
-- ⚡ **Parallel** — batch-fetch up to N pages simultaneously (`batch` command)
-- 🎭 **Human-like** — random delays, scroll patterns, typing speed variation
-- 🌐 **Multi-engine** — Google (with login), Bing, DuckDuckGo, multi-page support
-- 📄 **JS rendering** — full Chromium render, handles SPAs and React/Vue
-- 📸 **Screenshots** — `--screenshot` flag saves PNG on every fetch
-- 🔄 **Retry** — `--retries N` with exponential backoff
-- ⚠️ **Captcha detection** — auto-screenshot + queue for Telegram alert
-- 🔀 **Proxy support** — `--proxy url` or proxy list file with round-robin rotation
-- 📊 **Site extractors** — Twitter timeline/search, Reddit feed, HackerNews, GitHub trending
+| Feature | Description |
+|---------|-------------|
+| 🖥️ GUI mode | `headless: false` + Xvfb, passes all bot detection |
+| 🔐 Real session | Uses Chrome profile: cookies, history, fingerprint |
+| ⚡ Parallel | Batch-fetch N pages simultaneously |
+| 📦 Smart cache | TTL-based, instant repeat fetches |
+| 🔍 Research mode | Search + read top-N pages in one command |
+| 🌐 Multi-engine | Google (with login), Bing, DuckDuckGo |
+| 📊 Site extractors | Twitter, Reddit, HN, GitHub structured data |
+| 🖥️ Server mode | Persistent HTTP API, 3-5s faster per request |
+| 👀 Watch mode | Monitor page changes with alerts |
+| 🔄 Retry | Exponential backoff on failures |
+| ⚠️ Captcha | Auto-solve checkbox + human fallback |
+| 📸 Screenshots | PNG on every fetch |
+| 🔀 Proxy | Rotation with health-check |
 
 ## Quick Start
 
 ```bash
 npm install
-npx playwright install chromium  # if needed
+# Xvfb should be running (OpenClaw auto-starts it on :99)
 
-# Search Google (uses your Chrome profile = no captcha)
-node ghost-browse.mjs search "latest AI news" --limit 10 --engine google
+# Search
+node ghost-browse.mjs search "AI news" --engine google --limit 10
+node ghost-browse.mjs search "bitcoin price" --limit 10  # DDG default
 
-# Search DuckDuckGo (no auth needed)
-node ghost-browse.mjs search "bitcoin price" --limit 10
+# Fetch page
+node ghost-browse.mjs fetch "https://techcrunch.com" --screenshot
 
-# Fetch a page (full JS render)
-node ghost-browse.mjs fetch "https://techcrunch.com"
+# Research (search + read + extract in one)
+node research.mjs "TON blockchain news" --limit 5
 
-# Batch fetch (parallel)
-node ghost-browse.mjs batch "https://site1.com" "https://site2.com" "https://site3.com"
-
-# Multi-page search
-node ghost-browse.mjs pages "bitcoin news" --pages 3
-```
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `search "query"` | Search (DDG default, or `--engine google\|bing`) |
-| `pages "query" --pages N` | Search across N pages |
-| `fetch "url"` | Fetch and render a single URL |
-| `batch "url1" "url2"...` | Fetch multiple URLs in parallel |
-
-### Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--engine google\|bing\|ddg` | ddg | Search engine |
-| `--limit N` | 10 | Max results |
-| `--pages N` | 3 | Pages to search |
-| `--concurrency N` | 5 | Parallel fetches |
-| `--scroll` | false | Scroll to load lazy content |
-| `--screenshot` | false | Save PNG screenshot |
-| `--max N` | 8000 | Max chars in output |
-| `--retries N` | 2 | Retry on failure (exponential backoff) |
-| `--proxy url\|file` | none | Proxy or file with proxy list |
-| `--json` | false | JSON output |
-| `--alert-telegram` | false | Queue captcha alert for Telegram |
-
-## Site Extractors (`extractors.mjs`)
-
-Structured data extractors for major sites — uses real Chrome session:
-
-```bash
-# Your Twitter/X timeline
+# Site extractors
 node extractors.mjs twitter-timeline --limit 20
-
-# Twitter search
-node extractors.mjs twitter-search "TON blockchain"
-
-# Reddit subreddit
-node extractors.mjs reddit-feed programming
-node extractors.mjs reddit-feed worldnews --limit 10
-
-# HackerNews
-node extractors.mjs hackernews top --limit 20
-
-# GitHub trending
+node extractors.mjs reddit-feed programming --limit 10
+node extractors.mjs hackernews top
 node extractors.mjs github-trending javascript
-node extractors.mjs github-trending python --limit 10
 
-# Article extraction
-node extractors.mjs article "https://example.com/article"
-```
+# Persistent server
+node server.mjs --port 3847
+curl "localhost:3847/search?q=query"
+curl "localhost:3847/fetch?url=https://..."
 
-All extractors support `--json` and `--limit`.
+# Monitor changes
+node watch.mjs "https://example.com/status" --interval 60
 
-## Profile Manager (`profile-manager.mjs`)
-
-Import cookies from your Chrome browser:
-
-```bash
-# Import all key sites at once (Twitter, Reddit, Google, ChatGPT, Polymarket...)
+# Manage profiles
 node profile-manager.mjs import-cdp
-
-# List saved profiles
 node profile-manager.mjs list
-
-# Inspect a profile
-node profile-manager.mjs show x-com
 ```
 
-Profiles are stored locally in `profiles/` and gitignored (they contain auth tokens).
+## Architecture
+
+```
+ghost-browse.mjs          Core: search, fetch, batch, pages
+├── research.mjs           Search + read + extract pipeline
+├── extractors.mjs         Twitter, Reddit, HN, GitHub parsers
+├── server.mjs             Persistent HTTP API server
+├── watch.mjs              Page change monitor
+├── cache.mjs              Smart TTL cache
+├── captcha-handler.mjs    Auto-solve + human fallback
+├── profile-manager.mjs    Cookie import & management
+└── profiles/              Auth cookies (gitignored)
+```
 
 ## How GUI Mode Works
 
@@ -119,33 +80,75 @@ Xvfb :99 ─── virtual 1920×1080 display
      │
      └── google-chrome-stable (headless: false)
               │
-              ├── Real Chrome profile (cookies, history, fingerprint)
+              ├── Copied real Chrome profile (no SingletonLock conflict)
               ├── navigator.webdriver = undefined
               ├── window.chrome = { runtime: ... }
-              └── Looks 100% like a real human browser
+              ├── Random UA, viewport, timezone per session
+              └── Looks 100% real to Google/Twitter/Reddit
 ```
 
-This is why it passes Google/Twitter/Reddit detection where headless browsers fail.
+## All Commands
 
-## Requirements
+### ghost-browse.mjs
+```
+search "query" [--limit N] [--engine google|bing|ddg] [--proxy url] [--json]
+fetch  "url"   [--scroll] [--max N] [--screenshot] [--retries N] [--json]
+batch  "url1" "url2" ...  [--concurrency N] [--max N] [--json]
+pages  "query" [--pages N] [--engine google|bing|ddg] [--json]
+```
 
-- Linux with Xvfb (auto-started if not running)
-- Google Chrome stable (`/usr/bin/google-chrome-stable`)
-- Node.js 18+
-- For OpenClaw: profile at `/home/openclawd/.openclaw/browser/openclaw/user-data`
+### research.mjs
+```
+node research.mjs "topic" [--limit 5] [--engine ddg|google] [--max 3000] [--concurrency 3] [--json]
+```
 
-## Tested Results
+### extractors.mjs
+```
+twitter-timeline [--limit N] [--json]
+twitter-search "query" [--limit N] [--json]
+reddit-feed [subreddit] [--limit N] [--json]
+hackernews [top|new|ask|show] [--limit N] [--json]
+github-trending [language] [--limit N] [--json]
+article "url" [--json]
+```
+
+### server.mjs
+```
+node server.mjs [--port 3847]
+GET  /search?q=query&engine=ddg&limit=10
+GET  /fetch?url=https://...&max=8000
+GET  /status
+POST /stop
+```
+
+### watch.mjs
+```
+node watch.mjs "url" [--interval 300] [--selector ".price"] [--once]
+```
+
+### profile-manager.mjs
+```
+list / import-cdp / show <name> / delete <name> / export-netscape <name>
+```
+
+## Tested
 
 | Site | Status | Notes |
 |------|--------|-------|
-| Google Search | ✅ Works | Uses Chrome profile (no captcha) |
-| DuckDuckGo | ✅ Works | No auth needed |
-| Bing | ✅ Works | No auth needed |
-| Reddit | ✅ Works | GUI mode bypasses bot detection |
-| Twitter/X | ✅ Works | Real timeline with auth |
-| HackerNews | ✅ Works | No auth needed |
-| GitHub Trending | ✅ Works | No auth needed |
+| Google | ✅ | With Chrome profile, no captcha |
+| DuckDuckGo | ✅ | No auth needed |
+| Bing | ✅ | No auth needed |
+| Reddit | ✅ | GUI mode bypasses detection |
+| Twitter/X | ✅ | Real timeline with auth |
+| HackerNews | ✅ | Works great |
+| GitHub | ✅ | Trending, repos |
+
+## Requirements
+
+- Linux with Xvfb (`Xvfb :99 -screen 0 1920x1080x24`)
+- Google Chrome stable
+- Node.js 18+
 
 ## License
 
-MIT — open source, use freely.
+MIT

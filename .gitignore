@@ -4,3 +4,9 @@ node_modules/
 .DS_Store
 profiles/*.json
 profiles/*.txt
+.cache/
+.watch-state/
+screenshots/
+captcha-screenshots/
+profiles/*.json
+profiles/*.txt

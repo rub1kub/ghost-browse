@@ -19,6 +19,7 @@ import { existsSync, readFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { isCaptcha, handleCaptcha } from './captcha-handler.mjs';
+import { getCached, setCache } from './cache.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const PROFILES_DIR = join(__dir, 'profiles');
@@ -392,6 +393,12 @@ async function searchDDG(page, query, pageNum = 1) {
 // ─── Page fetch ───────────────────────────────────────────────────────────────
 
 async function fetchPage(browser, url, opts = {}) {
+  // Check cache first (unless --no-cache)
+  if (!opts.noCache) {
+    const cached = getCached(url, opts.cacheTtl || 600000);
+    if (cached) { cached.fromCache = true; return cached; }
+  }
+
   const context = await newContextFromBrowser(browser, { profile: opts.profile });
   const page = await context.newPage();
 
@@ -459,6 +466,9 @@ async function fetchPage(browser, url, opts = {}) {
     result.content = htmlToMarkdown(result.html);
     delete result.html;
     if (screenshotPath) result.screenshotPath = screenshotPath;
+
+    // Cache the result
+    if (!opts.noCache) setCache(url, result);
 
     return result;
   } finally {
@@ -654,36 +664,43 @@ const commands = {
 
 if (!cmd || !commands[cmd]) {
   console.log(`
-ghost-browse v1.2.0 — Stealth parallel browser for AI agents
+ghost-browse v2.0.0 — Stealth browser for AI agents (GUI mode)
 
-Commands:
+Core commands:
   search "query" [--limit N] [--engine google|bing|ddg] [--proxy url] [--json]
-  fetch  "url"   [--scroll]  [--max N]  [--profile name] [--screenshot] [--retries N] [--json]
-  batch  "url1" "url2" ...   [--concurrency N] [--max N] [--proxy url] [--json]
+  fetch  "url"   [--scroll]  [--max N]  [--screenshot] [--retries N] [--json]
+  batch  "url1" "url2" ...   [--concurrency N] [--max N] [--json]
   pages  "query" [--pages N] [--engine google|bing|ddg] [--json]
 
-Extended commands (extractors.mjs):
-  node extractors.mjs twitter-timeline    --profile x-com
-  node extractors.mjs reddit-feed [sub]   --profile reddit-com
-  node extractors.mjs hackernews [top|new|ask]
-  node extractors.mjs github-trending [lang]
+Research & monitoring:
+  node research.mjs "topic" [--limit 5] [--engine ddg] [--json]
+  node watch.mjs "url" [--interval 300] [--selector ".price"] [--once]
+  node server.mjs [--port 3847]    # persistent HTTP API
+
+Site extractors (extractors.mjs):
+  node extractors.mjs twitter-timeline --limit 20
+  node extractors.mjs reddit-feed programming
+  node extractors.mjs hackernews top
+  node extractors.mjs github-trending javascript
   node extractors.mjs twitter-search "query"
+  node extractors.mjs article "url"
 
 Profiles (profile-manager.mjs):
-  node profile-manager.mjs import-cdp    # import from OpenClaw browser (full decrypt)
-  node profile-manager.mjs list
-  node profile-manager.mjs show <name>
+  node profile-manager.mjs import-cdp    # import from Chrome (full decrypt)
+  node profile-manager.mjs list / show <name>
 
 Features:
-  • Anti-detection: randomized UA, viewport, timezone, evasion scripts
-  • Parallel: batch fetches up to N pages simultaneously (--concurrency)
-  • Proxy rotation: --proxy http://user:pass@host:port (or path to proxy list file)
-  • Session profiles: cookies/auth per site (--profile reddit-com)
-  • Captcha detection: auto-screenshot + Telegram alert (--alert-telegram)
-  • Screenshots: --screenshot saves PNG on every fetch
-  • Retry logic: --retries N (exponential backoff)
-  • JS rendering: full Chromium render, handles SPAs
-  • Site extractors: Twitter, Reddit, HN, GitHub (extractors.mjs)
+  ✅ GUI mode via Xvfb — undetectable by Google/Twitter/Reddit
+  ✅ Real Chrome profile — full auth, cookies, fingerprint
+  ✅ Smart cache — TTL-based, avoid redundant fetches
+  ✅ Parallel — batch up to N pages simultaneously
+  ✅ Proxy rotation — --proxy url|file
+  ✅ Captcha — auto-solve checkbox + screenshot human fallback
+  ✅ Retry — --retries N (exponential backoff)
+  ✅ Screenshots — --screenshot on every fetch
+  ✅ Persistent server — HTTP API, 3-5s faster per request
+  ✅ Watch mode — monitor changes with alerts
+  ✅ Research mode — search + read + extract in one command
 `);
   process.exit(0);
 }
