@@ -16,6 +16,9 @@ const DEFAULTS = {
   defaultEngine: 'ddg',
   cacheTtlMs: 600000,
   serverPort: 3847,
+  serverHost: '127.0.0.1',
+  // Optional auth token for HTTP server mode (Bearer)
+  serverAuthToken: process.env.GHOST_BROWSE_TOKEN || null,
   rateLimits: {
     'google.com': { requests: 3, perMs: 60000 },
     'x.com': { requests: 10, perMs: 60000 },

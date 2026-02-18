@@ -17,7 +17,7 @@ Stealth browser toolkit for AI agents. GUI mode via Xvfb — undetectable by Goo
 | 🔍 Research mode | Search + read top-N pages in one command |
 | 🌐 Multi-engine | Google (with login), Bing, DuckDuckGo |
 | 📊 Site extractors | Twitter, Reddit, HN, GitHub structured data |
-| 🖥️ Server mode | Persistent HTTP API, 3-5s faster per request |
+| 🖥️ Server mode | Persistent HTTP API, 3-5s faster per request, localhost bind + optional Bearer auth |
 | 👀 Watch mode | Monitor page changes with diff alerts |
 | 🔄 Retry | Exponential backoff on failures |
 | ⚠️ Captcha | Auto-solve checkbox + human fallback |
@@ -51,10 +51,15 @@ node extractors.mjs reddit-feed programming --limit 10
 node extractors.mjs hackernews top
 node extractors.mjs github-trending javascript
 
-# Persistent server
-node server.mjs --port 3847
-curl localhost:3847/search?q=query&engine=ddg
-curl localhost:3847/fetch?url=https://example.com
+# Persistent server (secure default: localhost)
+node server.mjs --host 127.0.0.1 --port 3847
+curl "http://127.0.0.1:3847/search?q=query&engine=ddg"
+curl "http://127.0.0.1:3847/fetch?url=https://example.com"
+
+# With auth token (recommended if not localhost-only)
+export GHOST_BROWSE_TOKEN="change-me"
+node server.mjs --host 0.0.0.0 --port 3847
+curl -H "Authorization: Bearer $GHOST_BROWSE_TOKEN" "http://127.0.0.1:3847/status"
 
 # Watch for changes
 node watch.mjs "https://example.com/status" --interval 60
@@ -121,6 +126,8 @@ Optional `ghost-browse.config.json`:
   "defaultEngine": "ddg",
   "cacheTtlMs": 600000,
   "serverPort": 3847,
+  "serverHost": "127.0.0.1",
+  "serverAuthToken": null,
   "rateLimits": {
     "google.com": { "requests": 3, "perMs": 60000 },
     "default": { "requests": 20, "perMs": 60000 }
@@ -129,6 +136,8 @@ Optional `ghost-browse.config.json`:
 ```
 
 All settings have sensible defaults — config file is optional.
+
+`serverAuthToken` can also be set via env: `GHOST_BROWSE_TOKEN=...`.
 
 ## Cookie Profiles
 
@@ -180,6 +189,15 @@ ghost-browse.mjs          Main CLI (search, fetch, batch, pages)
 - Google Chrome (`/usr/bin/google-chrome-stable`)
 - Xvfb running on `:99` (for GUI mode)
 - Optional: `pdftotext` (poppler-utils) or Python `pdfplumber`/`PyPDF2` for PDF extraction
+
+## Tests
+
+```bash
+npm test              # fast local checks (deterministic)
+npm run smoke         # live smoke checks (network/browser)
+```
+
+Live smoke checks are optional and can be flaky if target sites rate-limit or require CAPTCHA.
 
 ## License
 

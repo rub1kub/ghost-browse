@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.5.0 (2026-02-18) — Server Hardening + Smoke Tests
+
+### NEW: Server hardening (`server.mjs`)
+- Added explicit host binding (`--host`, default `127.0.0.1`)
+- Added optional Bearer auth (`--token` or `GHOST_BROWSE_TOKEN` / `serverAuthToken` in config)
+- Protected API endpoints: `/search`, `/fetch`, `/status`, `/stop`
+- Improved startup logging for auth mode visibility
+
+### NEW: Test suite (`test.mjs`)
+- Added deterministic local tests:
+  - config defaults
+  - fingerprint determinism per profile seed
+  - server auth guard (`401` without token, `200` with token)
+- Added optional live smoke checks (search + fetch) via `npm run smoke`
+
+### Version sync
+- `package.json` updated to `2.5.0` (changelog/version alignment restored)
+- Added npm script: `smoke`
+
+---
+
 ## v2.4.0 (2026-02-17) — Research Intelligence
 
 ### NEW: Topic Decomposition (`--decompose`)

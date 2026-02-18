@@ -4,11 +4,11 @@
  * Keeps Chrome running between calls — saves 3-5s per request
  *
  * Usage:
- *   node server.mjs [--port 3847]
- *   curl localhost:3847/search?q=query
- *   curl localhost:3847/fetch?url=https://...
- *   curl localhost:3847/status
- *   curl -X POST localhost:3847/stop
+ *   node server.mjs [--host 127.0.0.1] [--port 3847] [--token your-token]
+ *   curl -H "Authorization: Bearer your-token" "http://127.0.0.1:3847/search?q=query"
+ *   curl -H "Authorization: Bearer your-token" "http://127.0.0.1:3847/fetch?url=https://..."
+ *   curl -H "Authorization: Bearer your-token" "http://127.0.0.1:3847/status"
+ *   curl -X POST -H "Authorization: Bearer your-token" "http://127.0.0.1:3847/stop"
  */
 process.env.DISPLAY = process.env.DISPLAY || ':99';
 
@@ -20,7 +20,16 @@ import { waitForSlot, getStatus as getRateLimitStatus } from './rate-limiter.mjs
 import { loadConfig } from './config.mjs';
 
 const config = loadConfig();
-const PORT = parseInt(process.argv.find((a, i) => process.argv[i - 1] === '--port') || config.serverPort || '3847');
+
+function getArg(name, fallback = null) {
+  const idx = process.argv.indexOf(name);
+  if (idx !== -1 && idx + 1 < process.argv.length) return process.argv[idx + 1];
+  return fallback;
+}
+
+const PORT = parseInt(getArg('--port', String(config.serverPort || 3847)), 10);
+const HOST = getArg('--host', config.serverHost || '127.0.0.1');
+const AUTH_TOKEN = getArg('--token', process.env.GHOST_BROWSE_TOKEN || config.serverAuthToken || '');
 
 let browser = null;
 let requestCount = 0;
@@ -50,6 +59,23 @@ async function getBrowser() {
 
 function htmlToText(html) {
   return html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+function isAuthorized(req) {
+  if (!AUTH_TOKEN) return true;
+  const header = req.headers.authorization || '';
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return !!match && match[1] === AUTH_TOKEN;
+}
+
+function requireAuth(req, res) {
+  if (isAuthorized(req)) return true;
+  res.writeHead(401, {
+    'Content-Type': 'application/json',
+    'WWW-Authenticate': 'Bearer realm="ghost-browse"',
+  });
+  res.end(JSON.stringify({ error: 'unauthorized' }));
+  return false;
 }
 
 async function handleSearch(q, engine = 'ddg', limit = 10) {
@@ -127,13 +153,17 @@ async function handleFetch(url, maxChars = 8000, ttlMs = 600000) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const url = new URL(req.url, `http://${HOST}:${PORT}`);
   const path = url.pathname;
   requestCount++;
 
   res.setHeader('Content-Type', 'application/json');
 
   try {
+    if (['/search', '/fetch', '/status', '/stop'].includes(path)) {
+      if (!requireAuth(req, res)) return;
+    }
+
     if (path === '/search') {
       const q = url.searchParams.get('q');
       if (!q) { res.writeHead(400); res.end(JSON.stringify({ error: 'missing q param' })); return; }
@@ -174,10 +204,15 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`👻 ghost-browse server running on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`👻 ghost-browse server running on http://${HOST}:${PORT}`);
   console.log(`  GET /search?q=query&engine=ddg|bing|google&limit=10`);
   console.log(`  GET /fetch?url=https://...&max=8000`);
   console.log(`  GET /status`);
   console.log(`  POST /stop`);
+  if (AUTH_TOKEN) {
+    console.log('  Auth: Bearer token required (Authorization header)');
+  } else {
+    console.log('  Auth: disabled (set --token or GHOST_BROWSE_TOKEN to enable)');
+  }
 });
