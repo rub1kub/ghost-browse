@@ -1,5 +1,43 @@
 # Changelog
 
+## v2.6.0 (2026-03-05) — Reliability Upgrade (Self-Heal + Schema + Crawl Graph)
+
+### NEW: Self-healing actions
+- Added `self-heal-store.mjs` with selector memory (`.cache/self-heal.json`)
+- Added `smart-actions.mjs` for resilient `click` / `type` actions with selector fallback ranking
+- Cookie banner dismiss in `ghost-browse.mjs` now uses self-healing selector strategy
+
+### NEW: Schema extraction
+- Added `schema-extract.mjs` for stable structured JSON extraction from pages via schema file
+- Supports selector fallback, required fields, defaults, transforms (`number`, `int`, `lower`, `upper`, `trim`)
+
+### NEW: Crawl graph mapping
+- Added `crawl-map.mjs` for domain map + deep crawl graph (`nodes` + `edges`)
+- Supports `--depth`, `--max-pages`, `--same-domain`, `--out`
+
+### NEW: Queue + resume after crash
+- Added `queue-runner.mjs` with persistent state (`.queue/jobs-state.json`) and results folder
+- Supports `enqueue`, `run`, `status`, `retry`
+- Auto-resumes stale `in_progress` jobs back to pending
+
+### NEW: Session replay / trace
+- Added `trace-recorder.mjs`
+- `ghost-browse` commands now support `--trace` and write JSONL traces into `traces/`
+
+### NEW: Proxy intelligence
+- Added `proxy-intelligence.mjs` with:
+  - health scoring (success/failure + latency)
+  - cooldown on failing proxies
+  - sticky proxy sessions per domain
+- Integrated into core commands (`search`, `fetch`, `batch`, `pages`)
+
+### CLI + Docs
+- `ghost-browse.mjs` help updated to v2.6.0 and advanced command list
+- `README.md` updated with new modules and examples
+- `package.json` version bumped to `2.6.0`
+
+---
+
 ## v2.5.0 (2026-02-18) — Server Hardening + Smoke Tests
 
 ### NEW: Server hardening (`server.mjs`)

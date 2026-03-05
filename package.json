@@ -1,6 +1,6 @@
 {
   "name": "ghost-browse",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Stealth parallel browser for AI agents — anti-detection, JS rendering, parallel fetching",
   "type": "module",
   "main": "ghost-browse.mjs",
@@ -10,7 +10,11 @@
   "scripts": {
     "start": "node ghost-browse.mjs",
     "test": "node test.mjs",
-    "smoke": "node test.mjs --live"
+    "smoke": "node test.mjs --live",
+    "map": "node crawl-map.mjs",
+    "extract:schema": "node schema-extract.mjs",
+    "smart": "node smart-actions.mjs",
+    "queue": "node queue-runner.mjs"
   },
   "keywords": ["browser", "stealth", "playwright", "ai-agent", "scraping", "anti-detection", "openclaw", "skill"],
   "author": "rub1kub",
